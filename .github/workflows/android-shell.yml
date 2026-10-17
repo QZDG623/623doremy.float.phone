@@ -38,7 +38,7 @@ jobs:
       - name: Decode keystore (optional)
         if: ${{ env.SHELL_KEYSTORE_BASE64 != '' }}
         run: |
-          echo "$SHELL_KEYSTORE_BASE64" | tr -d '\r\n' | base64 -d > /tmp/shell.keystore
+          echo "$SHELL_KEYSTORE_BASE64" | tr -dc 'A-Za-z0-9+/=' | base64 -d > /tmp/shell.keystore
           echo "SHELL_KEYSTORE_FILE=/tmp/shell.keystore" >> "$GITHUB_ENV"
 
       - name: Build APKs
