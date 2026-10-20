@@ -287,18 +287,37 @@ export function addMinimaxBreathMarks(text: string): string {
     return out.join("");
 }
 
+// 世界书 §2.3 / §三：不同情绪的音高、语速本来就不同——生气是前慢后快、难过是
+// 拖腔下沉、惊讶是骤升。只给一个 emotion 参数，音色对了但语速节奏还是匀速念稿。
+// 这里按情绪表带一点 speed/pitch 偏移，只在用户没手工调过时生效（用户调过的优先）。
+const MINIMAX_EMOTION_TUNING: Record<string, { speed: number; pitch: number }> = {
+    happy: { speed: 1.05, pitch: 1 },
+    sad: { speed: 0.9, pitch: -1 },
+    angry: { speed: 0.95, pitch: -1 },
+    surprised: { speed: 1.0, pitch: 2 },
+    fearful: { speed: 1.05, pitch: 1 },
+    disgusted: { speed: 0.92, pitch: -1 },
+    calm: { speed: 0.95, pitch: 0 },
+};
+
 async function synthesizeMinimax(text: string, config: VoiceApiConfig, emotion?: string): Promise<Blob | null> {
     if (!config.apiKey) throw new Error("Minimax API Key 未配置");
+
+    const normalizedEmotion = emotion?.trim().toLowerCase();
+    const tuning = normalizedEmotion ? MINIMAX_EMOTION_TUNING[normalizedEmotion] : undefined;
+    const useEmotion = !!normalizedEmotion && MINIMAX_EMOTIONS.has(normalizedEmotion);
 
     const baseUrl = (config.baseUrl || "https://api.minimaxi.com/v1").replace(/\/$/, "");
     const voiceSetting: Record<string, unknown> = {
         voice_id: config.defaultVoice || "male-qn-qingse",
-        speed: normalizeMinimaxSpeed(config.speechSpeed),
+        speed: normalizeMinimaxSpeed(
+            typeof config.speechSpeed === "number" ? config.speechSpeed : tuning?.speed,
+        ),
         vol: 1.0,
-        pitch: normalizeMinimaxPitch(config.speechPitch),
+        pitch: normalizeMinimaxPitch(
+            typeof config.speechPitch === "number" ? config.speechPitch : tuning?.pitch,
+        ),
     };
-    const normalizedEmotion = emotion?.trim().toLowerCase();
-    const useEmotion = !!normalizedEmotion && MINIMAX_EMOTIONS.has(normalizedEmotion);
 
     const request = (withEmotion: boolean) => fetchWithTimeout(`${baseUrl}/t2a_v2`, {
         method: "POST",

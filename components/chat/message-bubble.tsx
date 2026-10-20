@@ -12,7 +12,7 @@ import { ContactCardGenerateFlow } from "@/components/chat/contact-card-generate
 import { MediaPreviewOverlay } from "@/components/chat/media-preview-overlay";
 import { findStickerByName } from "@/lib/sticker-data";
 import { splitBilingualText } from "@/lib/bilingual-text";
-import { isInvisibleOrWhitespaceOnly } from "@/lib/rich-message-parser";
+import { isInvisibleOrWhitespaceOnly, stripPerformanceShells } from "@/lib/rich-message-parser";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import remarkGfm from "remark-gfm";
@@ -258,8 +258,14 @@ function splitChatContent(text: string): { type: "md" | "html"; content: string 
     return segments;
 }
 
+// 只有看起来像表演指令的正文才走剥壳流程：避免把用户随手打的 [1]、（注）清掉。
+const PERFORMANCE_HINT_RE = /<[a-zA-Z][^>]*>|\((?:laughs|chuckle|coughs|clear-throat|groans|breath|pant|inhale|exhale|gasp|sniffs|sighs|snorts|burps|lip-smacking|humming|hissing|emm|sneezes)\)|【[^】]*】|（[^）]*）/i;
+
 export function normalizeTextBubbleContent(content: string): string {
-    const cleaned = content
+    // 表演指令（灰色旁白 HTML 块、(breath) 等 Sound Tag）不该出现在气泡里。
+    // 这里是最外层渲染入口，所以历史里已经存下的旧消息也一并被清掉。
+    const base = PERFORMANCE_HINT_RE.test(content) ? stripPerformanceShells(content) : content;
+    const cleaned = base
         .replace(/\[音乐(?:分享)?(?:[：:][^\]]*)?\]/g, "")
         .replace(/\[[^\]]+拍了拍[^\]]+\]/g, "")
         .replace(/\[[^\]]*?(?:获取指令|获取工具)[:：][^\]]*\]/g, "")
