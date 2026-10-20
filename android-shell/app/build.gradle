@@ -32,8 +32,10 @@ android {
         // 1.0.15：覆盖安装后首启清一次网页缓存（HTTP + Service Worker 的
         // CacheStorage）并重载，让线上站点的修复（语音清洗等）不再被设备上的
         // 旧 JS 缓存挡住。语音本身的实现仍在网页侧，壳不含网页代码。
-        versionCode 14
-        versionName "1.0.15"
+        // 1.0.16：随线上 v17 修复重发（灰色旁白不出气泡、语音只念台词），
+        // 覆盖安装后仍会清一次网页缓存。
+        versionCode 15
+        versionName "1.0.16"
         buildConfigField "String", "SITE_URL", "\"${siteUrl}\""
     }
 

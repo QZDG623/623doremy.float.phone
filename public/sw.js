@@ -5,9 +5,12 @@
 // v15：显示层清洗——灰色旁白气泡与 (breath) 标签不再进聊天正文；同样需要强制作废旧 JS。
 // v16：线下模式渲染路径也接入清洗（它不走 MessageBubble，以前会漏），并处理转义成
 //      `&lt;span&gt;` 的旁白 HTML；语音条时长按真实台词重算。再清一次旧缓存。
+// v17：v16 那次 Netlify 构建失败、线上一直停在 v15，设备侧仍跑着旧 JS。
+//      本次连同 APK 1.0.16 一起重发，再次清空旧缓存，确保灰色旁白与
+//      (breath) 清洗真正生效。
 // 注意：这么大范围的清空会让字体/模型重新下载一轮，是刻意为之——只在
 // 修复客户端"跑旧 JS"时才升版，日常改动不要动这个数字。
-const CACHE_VERSION = "ai-phone-pwa-v16";
+const CACHE_VERSION = "ai-phone-pwa-v17";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 
