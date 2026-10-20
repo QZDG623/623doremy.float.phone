@@ -13,6 +13,7 @@ import { MediaPreviewOverlay } from "@/components/chat/media-preview-overlay";
 import { findStickerByName } from "@/lib/sticker-data";
 import { splitBilingualText } from "@/lib/bilingual-text";
 import { isInvisibleOrWhitespaceOnly, stripPerformanceShells } from "@/lib/rich-message-parser";
+import { sanitizeSpeechText } from "@/lib/tts-service";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import remarkGfm from "remark-gfm";
@@ -2364,12 +2365,17 @@ function VoiceMessageBubble({ msg, characterId, onUpdate, defaultTranslationExpa
     const audioRef = useRef<HTMLAudioElement | null>(null);
     const mountedRef = useRef(true);
     useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
-    const text = msg.mediaData?.label || "语音消息";
+    // label 就是这条语音被念出来的文本。历史版本把旁白 HTML（连 style 里的整串 CSS）
+    // 一起存进了 label，于是"很短一句话却有 45 秒"而且念的全不是台词。这里先按 TTS
+    // 的同一套规则清洗，既用于重合成判定，也用于时长估算——存过脏 label 的旧语音会
+    // 因此判定为"待重合成"，点一下就用干净台词重录。
+    const rawLabel = msg.mediaData?.label || "语音消息";
+    const text = sanitizeSpeechText(rawLabel, { keepSoundTags: true, dropLatin: true }) || rawLabel;
     const bilingual = splitBilingualText(text);
     const speechText = bilingual?.original || text;
     const synthesizedFromText = msg.mediaData?.synthesizedFromText;
     const needsResynthesis = msg.role !== "user" && synthesizedFromText !== speechText;
-    const duration = msg.mediaData?.voiceDuration || Math.max(2, Math.ceil(speechText.length / 4));
+    const duration = msg.mediaData?.voiceDuration || Math.max(2, Math.ceil(speechText.replace(/\((?:breath|sighs|sniffs|gasp|exhale|inhale|pant|chuckle|laughs)\)/gi, "").length / 4));
 
     const playSrc = (src: string) => {
         // 必须用 <audio> 元素:iOS 静音拨键会掐掉 Web Audio 的输出(表现为全线
