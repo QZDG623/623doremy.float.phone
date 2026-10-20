@@ -28,8 +28,10 @@ android {
         // 1.0.12：截屏可选收件人；位置感知；睡眠（Health Connect）。
         // 1.0.13：只提版本号以放行覆盖安装；原生内容与 1.0.12 一致
         //（网页侧的语音/工具栏改动随线上站点即时生效，不需要重打包）。
-        versionCode 12
-        versionName "1.0.13"
+        // 1.0.14：同上，原生内容不变，重出一枚干净包用于覆盖安装；
+        // 语音等表现仍由线上站点（SITE_URL）决定，壳本身不含网页代码。
+        versionCode 13
+        versionName "1.0.14"
         buildConfigField "String", "SITE_URL", "\"${siteUrl}\""
     }
 
