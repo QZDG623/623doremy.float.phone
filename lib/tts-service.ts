@@ -39,6 +39,9 @@ export async function synthesizeSpeech(
         // 只念台词：先剥离 HTML/CSS 与旁白，并保留世界书的 (breath) 等 Sound Tag。
         const speechText = sanitizeSpeechText(text, { keepSoundTags: true, dropLatin: true });
         if (!speechText) return null;
+        // 只写了 (breath)/(sighs) 之类表演标记、没有一句台词的消息不算台词
+        // （聊天显示层已把这类消息整条隐藏），不该合成出一段没有人话的音频。
+        if (!hasSpeakableContent(speechText)) return null;
         // 角色自己没写呼吸标记时补上——匀速念完是"AI 腔"的主要来源。
         const performed = addMinimaxBreathMarks(speechText);
         // 调用方显式给了情绪就用它，否则按台词里的标签/关键词推断。
@@ -189,6 +192,17 @@ export function sanitizeSpeechText(raw: string, options?: { keepSoundTags?: bool
     // 10. 收尾：去掉中文标点前的多余空格，让断句更自然
     text = text.replace(/[ \t]+([，。！？、；：…])/g, "$1").replace(/[ \t]{2,}/g, " ");
     return text.trim();
+}
+
+/**
+ * 剥掉表演标记后还有可念的内容吗？
+ * 只写 (breath)/(sighs) 或 <#0.3#> 的消息是纯表演指令，不是台词——不该被朗读。
+ */
+function hasSpeakableContent(speechText: string): boolean {
+    const stripped = speechText
+        .replace(/<\s*#[0-9.]+\s*#\s*>/g, "")
+        .replace(MINIMAX_SOUND_TAG_RE, "");
+    return /[A-Za-z0-9\u3400-\u9fff\uf900-\ufaff]/.test(stripped);
 }
 
 /**

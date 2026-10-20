@@ -13,6 +13,8 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.AudioManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -69,11 +71,17 @@ class MainActivity : AppCompatActivity() {
          * 只需要管一个开关。渠道一旦创建过，后建的只更新名称/描述，不会重置用户选择。
          */
         const val CH_MESSAGES = "shell_messages"
+        /** 覆盖安装后清缓存的记号：存的是上次启动时的 versionCode。 */
+        const val PREFS_NAME = "float_shell"
+        const val KEY_LAST_VERSION_CODE = "last_launch_version_code"
     }
 
     private lateinit var rootContainer: FrameLayout
     private lateinit var webView: WebView
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
+
+    /** 本次是「覆盖安装后的首启」，需要在页面加载完成后清一次网页缓存并重载。 */
+    private var purgeWebCachePending = false
 
     /** 系统状态栏实际高度（CSS px，即物理像素 / density），实时更新。 */
     @Volatile
@@ -325,6 +333,11 @@ class MainActivity : AppCompatActivity() {
                     startActivity(Intent(Intent.ACTION_VIEW, url)); true
                 }.getOrDefault(true)
             }
+
+            override fun onPageFinished(view: WebView, url: String) {
+                super.onPageFinished(view, url)
+                if (purgeWebCachePending) purgeServiceWorkerCachesThenReload()
+            }
         }
 
         webView.webChromeClient = object : WebChromeClient() {
@@ -389,9 +402,51 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
+        // 覆盖安装后的首启：先清一次网页缓存，否则网页侧的修复（语音清洗等）会被
+        // 设备上的旧缓存挡住，表现为"装了新包语音还是旧的"。
+        purgeWebCacheAfterUpgrade()
+
         // 冷启动带深链（如来电接听）直接加载目标；否则加载首页
         webView.loadUrl(consumeOpenUrl(intent) ?: SITE_URL)
         ensurePushService()
+    }
+
+    /**
+     * 覆盖安装（versionCode 变化）后首启：清缓存 + 让 Service Worker 自查更新。
+     * 只在版本号变化时执行一次，避免每次启动都重下资源。
+     */
+    private fun purgeWebCacheAfterUpgrade() {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        if (prefs.getInt(KEY_LAST_VERSION_CODE, 0) == BuildConfig.VERSION_CODE) return
+        prefs.edit().putInt(KEY_LAST_VERSION_CODE, BuildConfig.VERSION_CODE).apply()
+        // 断网时不清理：清完又拉不到新资源，会把离线兜底的首页一起弄丢。
+        if (!isOnline()) return
+        webView.clearCache(true)
+        purgeWebCachePending = true
+    }
+
+    private fun isOnline(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
+
+    /**
+     * 页面加载完成后再清一次 Service Worker 的 CacheStorage 并重载一次：
+     * 只清 HTTP 缓存不够——/_next/static 的 chunk 由 SW 以 cache-first 兜着
+     * （见 public/sw.js），旧 chunk 会继续命中。这里借页面自身清缓存并触发
+     * SW 更新，随后重载拿到新构建；标记随即置回，不会循环重载。
+     */
+    private fun purgeServiceWorkerCachesThenReload() {
+        purgeWebCachePending = false
+        webView.evaluateJavascript(
+            "(async function(){try{var ks=await caches.keys();" +
+                "await Promise.all(ks.map(function(k){return caches.delete(k)}));" +
+                "var rs=await navigator.serviceWorker.getRegistrations();" +
+                "await Promise.all(rs.map(function(r){return r.update()}))}catch(e){}" +
+                "location.reload()})()",
+            null,
+        )
     }
 
     /** singleTask：App 已在运行时（如全屏来电页接听）通过 onNewIntent 送达深链 */
