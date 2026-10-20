@@ -57,6 +57,27 @@ export function isInvisibleOrWhitespaceOnly(text: string): boolean {
     return INVISIBLE_OR_WHITESPACE_ONLY_RE.test(text);
 }
 
+// 表演指令的外壳：HTML 标签（style 属性里常带整串 CSS）、方括号/中文括号/圆括号/
+// 花括号/书名号块。按语音世界书，括号内内容都是"怎么演"而不是"说什么"。
+const PERFORMANCE_SHELL_RE = /<[^>]*>|\[[^\]]*\]|【[^】]*】|（[^）]*）|\([^)]*\)|\{[^}]*\}|《[^》]*》|〈[^〉]*〉/g;
+const DANGLING_BRACKET_RE = /[\[\]【】（）(){}《》〈〉<>]/g;
+
+/**
+ * 内容是否"整条都不是台词"——只剩旁白/动作/音效指令。
+ *
+ * 把 HTML 与各类括号块剥掉之后若再无任何可见字符，说明这条消息只是角色的
+ * 神态、动作或 Sound Tag（例如 `[月薪喵擦汗<span style="…">（秀腹肌）</span>]`、
+ * `(sighs)`）。这类消息既不是台词，也不该被念出来，显示层整条隐藏。
+ * 只要还有一句真话（哪怕旁边挂着 (breath)），就不算。
+ */
+export function isNonDialogueOnlyContent(text: string): boolean {
+    if (!text) return false;
+    const rest = text
+        .replace(PERFORMANCE_SHELL_RE, " ")
+        .replace(DANGLING_BRACKET_RE, " ");
+    return isInvisibleOrWhitespaceOnly(rest);
+}
+
 const C = "\\s*[：:]\\s*"; // half-width or full-width colon, allowing surrounding spaces
 
 function parseMuteMinutes(num?: string, unit?: string): number {

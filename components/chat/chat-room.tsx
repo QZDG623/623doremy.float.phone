@@ -5,7 +5,7 @@ import { ChatSession, ChatMessage, CHAT_APP_SETTINGS_UPDATED_EVENT, CHAT_INITIAL
 import { cleanStreamText, splitStreamPreviewSegments, stripLiteralTexts, stripXmlTagBlocks } from "@/lib/stream-preview";
 import type { StateValue } from "@/lib/chat-storage";
 import { parseStateValues, mergeStateValues } from "@/lib/state-value-parser";
-import { parseAIResponse, type ParsedMessagePart } from "@/lib/rich-message-parser";
+import { parseAIResponse, isNonDialogueOnlyContent, type ParsedMessagePart } from "@/lib/rich-message-parser";
 import { isKnownStickerLabel } from "@/lib/sticker-data";
 import { translateReasoningText } from "@/lib/reasoning-translate";
 import { MessageBubble, MediaDetailModal, prewarmStickerCache, BilingualTextBlock, isStandaloneHtmlPreviewContent, normalizeTextBubbleContent } from "./message-bubble";
@@ -282,6 +282,21 @@ function reasoningPreviewLine(text: string): string {
 
 function isHiddenChatFlowMessage(msg: ChatMessage, displayContent?: string): boolean {
     if (msg.mediaType === "tool_result" || msg.mediaType === "tool_call") return true;
+    // 纯旁白/动作/音效指令（非台词）整条不显示：角色的神态、动作、Sound Tag 不是
+    // 说出口的话，留在聊天里只会是一串灰色乱码，还会被语音当成台词念出来。
+    // 只对纯文本与语音条生效——卡片类富媒体气泡的内容本来就为空，别误伤。
+    // 状态栏/内心独白/思维链挂在这条消息上时仍要显示，否则面板会跟着消失。
+    const plainOrVoice = !msg.mediaType || msg.mediaType === "audio";
+    const rawContent = displayContent ?? msg.content;
+    if (msg.role !== "user"
+        && plainOrVoice
+        && !msg.statusPanel
+        && !msg.innerMonologue
+        && !msg.reasoningText
+        && isNonDialogueOnlyContent(rawContent)
+        && !isStandaloneHtmlPreviewContent(rawContent)) {
+        return true;
+    }
     return !isChatVisualMedia(msg)
         && !getChatFlowVisibleContent(msg, displayContent)
         && uiRole(msg) !== "system"

@@ -39,9 +39,11 @@ export async function synthesizeSpeech(
         // 只念台词：先剥离 HTML/CSS 与旁白，并保留世界书的 (breath) 等 Sound Tag。
         const speechText = sanitizeSpeechText(text, { keepSoundTags: true, dropLatin: true });
         if (!speechText) return null;
+        // 角色自己没写呼吸标记时补上——匀速念完是"AI 腔"的主要来源。
+        const performed = addMinimaxBreathMarks(speechText);
         // 调用方显式给了情绪就用它，否则按台词里的标签/关键词推断。
-        const emotion = options?.emotion?.trim() || inferMinimaxEmotion(speechText) || undefined;
-        return synthesizeMinimax(speechText, voiceConfig, emotion);
+        const emotion = options?.emotion?.trim() || inferMinimaxEmotion(performed) || undefined;
+        return synthesizeMinimax(performed, voiceConfig, emotion);
     }
 
     if (provider === "OpenAI") {
@@ -214,6 +216,61 @@ function inferMinimaxEmotion(text: string): string | null {
     for (const [emotion, re] of MINIMAX_TAG_EMOTION) if (re.test(text)) return emotion;
     for (const [emotion, re] of MINIMAX_KEYWORD_EMOTION) if (re.test(text)) return emotion;
     return null;
+}
+
+// ── 呼吸/停顿补全（世界书 §2.1 呼吸栏）────────────────
+// 角色没按世界书写呼吸标记时，MiniMax 会一字不差地匀速念完——这正是"AI 腔"最明显
+// 的地方。这里在句末标点（语义边界，绝不会切进词里）之间补一次 (breath)：
+// 真人说话本来就在这里换气，MiniMax 会把标签演绎成真的吸气声，顺带把语流切开。
+const CJK_CHAR_RE = /[\u3400-\u9fff\uf900-\ufaff]/g;
+// 文本里已经有任何一个呼吸/语气标记就不再补：角色自己演过了，再叠一次会显得喘。
+const EXISTING_TAG_RE = /\((?:laughs|chuckle|coughs|clear-throat|groans|breath|pant|inhale|exhale|gasp|sniffs|sighs|snorts|burps|lip-smacking|humming|hissing|emm|sneezes)\)/i;
+
+function countCjk(text: string): number {
+    return (text.match(CJK_CHAR_RE) || []).length;
+}
+
+/** 单条长句（中间只有逗号）在靠近句中的那处逗号后换气——世界书 BRE-05。 */
+function insertBreathAtMiddleComma(text: string): string {
+    const clauses = text.split(/(?<=[，、；])/).map(s => s.trim()).filter(Boolean);
+    if (clauses.length < 2) return text;
+    const total = countCjk(text);
+    let acc = 0;
+    let insertAt = -1;
+    let bestDiff = Infinity;
+    for (let i = 0; i < clauses.length - 1; i += 1) {
+        acc += countCjk(clauses[i]);
+        const diff = Math.abs(acc - total / 2);
+        if (diff < bestDiff) { bestDiff = diff; insertAt = i + 1; }
+    }
+    if (insertAt < 1) return text;
+    return clauses.map((clause, i) => (i === insertAt ? `(breath) ${clause}` : clause)).join("");
+}
+
+export function addMinimaxBreathMarks(text: string): string {
+    if (!text || EXISTING_TAG_RE.test(text)) return text;
+    const cjkCount = countCjk(text);
+    // 短句本来就是一口气说完的，硬加换气反而假（§2.1 注意：每 100 字 3-4 处为上限）。
+    if (cjkCount < 16) return text;
+
+    const sentences = text.split(/(?<=[。！？!?…])/).map(s => s.trim()).filter(Boolean);
+    if (sentences.length < 2) {
+        return cjkCount >= 30 ? insertBreathAtMiddleComma(text) : text;
+    }
+
+    let budget = Math.max(1, Math.min(4, Math.round(cjkCount / 100 * 3)));
+    const out: string[] = [sentences[0]];
+    for (let i = 1; i < sentences.length; i += 1) {
+        const sentence = sentences[i];
+        // 只在够长的句子前换气；短句连读才像人在说话。
+        if (budget > 0 && countCjk(sentence) >= 10) {
+            out.push(`(breath) ${sentence}`);
+            budget -= 1;
+        } else {
+            out.push(sentence);
+        }
+    }
+    return out.join("");
 }
 
 async function synthesizeMinimax(text: string, config: VoiceApiConfig, emotion?: string): Promise<Blob | null> {
