@@ -2370,9 +2370,11 @@ function VoiceMessageBubble({ msg, characterId, onUpdate, defaultTranslationExpa
     // 的同一套规则清洗，既用于重合成判定，也用于时长估算——存过脏 label 的旧语音会
     // 因此判定为"待重合成"，点一下就用干净台词重录。
     const rawLabel = msg.mediaData?.label || "语音消息";
-    const text = sanitizeSpeechText(rawLabel, { keepSoundTags: true, dropLatin: true }) || rawLabel;
-    const bilingual = splitBilingualText(text);
-    const speechText = bilingual?.original || text;
+    const bilingual = splitBilingualText(rawLabel);
+    // 双语消息只念原文那半，译文本来就不该被读出来；清洗放在切分之后，
+    // 免得 dropLatin 先把英文原文抹掉、把 "原文|译文" 的结构弄坏。
+    const text = sanitizeSpeechText(bilingual?.original || rawLabel, { keepSoundTags: true, dropLatin: true }) || rawLabel;
+    const speechText = text;
     const synthesizedFromText = msg.mediaData?.synthesizedFromText;
     const needsResynthesis = msg.role !== "user" && synthesizedFromText !== speechText;
     const duration = msg.mediaData?.voiceDuration || Math.max(2, Math.ceil(speechText.replace(/\((?:breath|sighs|sniffs|gasp|exhale|inhale|pant|chuckle|laughs)\)/gi, "").length / 4));
