@@ -3,9 +3,11 @@
 // 旧包会被一直留在 RUNTIME_CACHE 里。升 CACHE_VERSION 会在 activate 时整批清空。
 // v14：同上，为语音朗读清洗（只念台词、不再把 CSS/旁白当台词念）清一次旧缓存。
 // v15：显示层清洗——灰色旁白气泡与 (breath) 标签不再进聊天正文；同样需要强制作废旧 JS。
+// v16：线下模式渲染路径也接入清洗（它不走 MessageBubble，以前会漏），并处理转义成
+//      `&lt;span&gt;` 的旁白 HTML；语音条时长按真实台词重算。再清一次旧缓存。
 // 注意：这么大范围的清空会让字体/模型重新下载一轮，是刻意为之——只在
 // 修复客户端"跑旧 JS"时才升版，日常改动不要动这个数字。
-const CACHE_VERSION = "ai-phone-pwa-v15";
+const CACHE_VERSION = "ai-phone-pwa-v16";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 

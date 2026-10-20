@@ -63,6 +63,21 @@ const PERFORMANCE_SHELL_RE = /<[^>]*>|\[[^\]]*\]|【[^】]*】|（[^）]*）|\([
 const DANGLING_BRACKET_RE = /[\[\]【】（）(){}《》〈〉<>]/g;
 
 /**
+ * 模型/同步链路偶尔把旁白 HTML 转义成 `&lt;span style=…&gt;`，渲染出来就是一整段
+ * 灰字乱码，而按标签正则匹配时又看不到 `<`。判空与剥壳前先还原成真标签。
+ * `&amp;` 必须最后还原，否则 `&amp;lt;` 会被当成标签。
+ */
+function decodeDisplayEntities(text: string): string {
+    return text
+        .replace(/&nbsp;/gi, " ")
+        .replace(/&lt;/gi, "<")
+        .replace(/&gt;/gi, ">")
+        .replace(/&quot;/gi, '"')
+        .replace(/&#0*39;|&apos;/gi, "'")
+        .replace(/&amp;/gi, "&");
+}
+
+/**
  * 内容是否"整条都不是台词"——只剩旁白/动作/音效指令。
  *
  * 把 HTML 与各类括号块剥掉之后若再无任何可见字符，说明这条消息只是角色的
@@ -72,7 +87,7 @@ const DANGLING_BRACKET_RE = /[\[\]【】（）(){}《》〈〉<>]/g;
  */
 export function isNonDialogueOnlyContent(text: string): boolean {
     if (!text) return false;
-    const rest = text
+    const rest = decodeDisplayEntities(text)
         .replace(PERFORMANCE_SHELL_RE, " ")
         .replace(DANGLING_BRACKET_RE, " ");
     return isInvisibleOrWhitespaceOnly(rest);
@@ -98,13 +113,15 @@ const BRACKET_BLOCK_RE = /\[[^\]\n]*\]|【[^】\n]*】|\{[^}\n]*\}|〈[^〉\n]*�
 /** 剥掉表演指令外壳，返回"只该被看到"的正文。空串表示这条消息没有台词。 */
 export function stripPerformanceShells(text: string): string {
     if (!text) return "";
+    // 转义过的旁白 HTML（`&lt;span style=…&gt;`）先还原，否则 `<` 看不到、整段灰字都会留下来
+    const decoded = decodeDisplayEntities(text);
     // 完整的自定义 HTML 卡片（<script> + <style>）是渲染用的，整段原样保留
-    if (/<script\b[\s\S]*?<\/script>/i.test(text) && /<style\b[\s\S]*?<\/style>/i.test(text)) return text;
+    if (/<script\b[\s\S]*?<\/script>/i.test(decoded) && /<style\b[\s\S]*?<\/style>/i.test(decoded)) return text;
 
     const kept: string[] = [];
     const stash = (value: string) => `\u0001${kept.push(value) - 1}\u0001`;
 
-    let out = text
+    let out = decoded
         .replace(DISPLAY_PROTECTED_RE, stash)
         .replace(HTML_BEARING_BRACKET_RE, " ")
         // 其余 HTML 标签：含 <#0.3#> 停顿标记，也含 style 属性里的整串 CSS 英文

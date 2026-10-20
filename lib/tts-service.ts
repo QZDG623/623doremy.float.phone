@@ -119,6 +119,28 @@ const MINIMAX_SOUND_TAGS = [
 
 const MINIMAX_SOUND_TAG_RE = new RegExp(`\\(\\s*(${MINIMAX_SOUND_TAGS.join("|")})\\s*\\)`, "gi");
 
+/**
+ * 语音世界书 §7.2 非官方/不适配标签替换表。
+ *
+ * speech-2.8 只认官方标签，其余会被模型当普通文本念出来（世界书叫"掉格式"）。
+ * 以前这些标签连同括号一起被删掉，表演直接丢失；现在按世界书的规则换成官方组合，
+ * 既不出字音、也保住"耳语/哽咽/打哈欠"该有的呼吸与语气。
+ * 顺序无所谓：全部先替换成官方形式，随后统一交给官方标签占位符保管。
+ */
+const MINIMAX_NONOFFICIAL_TAGS: Array<[RegExp, string]> = [
+    [/\(\s*(?:whispers?|耳语|气声)\s*\)/gi, "(breath)"],
+    [/\(\s*(?:low|[，,]?\s*unhurried|急促|低沉)\s*\)/gi, "(pant) (breath)"],
+    [/\(\s*(?:crying|cries|哭泣|哭腔)\s*\)/gi, "(sniffs) (breath)"],
+    [/\(\s*(?:yawns?|哈欠)\s*\)/gi, "(sighs) (breath)"],
+    [/\(\s*(?:clears?\s*-?\s*throat|清嗓)\s*\)/gi, "(clear-throat)"],
+    [/\(\s*(?:gasps|倒吸气)\s*\)/gi, "(gasp)"],
+    [/\(\s*(?:sniffle|sniffles|吸鼻)\s*\)/gi, "(sniffs)"],
+    [/\(\s*(?:laugh|大笑)\s*\)/gi, "(laughs)"],
+    [/\(\s*(?:chuckles|轻笑)\s*\)/gi, "(chuckle)"],
+    // §7.2-04：口哨没有对应标签，直接写成文本让模型自然演绎
+    [/\(\s*whistles?\s*\)/gi, "吹了声口哨"],
+];
+
 /** 中文（含扩展区）——用来判断"这条消息是不是在用中文说话"。 */
 const HAS_CHINESE_RE = /[\u3400-\u9fff\uf900-\ufaff]/;
 
@@ -152,6 +174,10 @@ export function sanitizeSpeechText(raw: string, options?: { keepSoundTags?: bool
     text = text.replace(/<\s*#[0-9.]+\s*#\s*>/g, stash);
     // 2b. 官方 Sound Tag（世界书用英文半角括号写标签，如 (breath)）
     if (keepSoundTags) {
+        // 非官方标签先按 §7.2 换成官方组合——否则它们会被模型当台词念出来。
+        for (const [pattern, replacement] of MINIMAX_NONOFFICIAL_TAGS) {
+            text = text.replace(pattern, replacement);
+        }
         // 模型偶尔会写成全角括号（breath）——先归一成半角，否则第 4 步会把整段
         // 括号当旁白删掉，本该演出来的呼吸/笑意就没了。
         text = text.replace(
@@ -227,6 +253,8 @@ const MINIMAX_TAG_EMOTION: Array<[string, RegExp]> = [
 ];
 
 const MINIMAX_KEYWORD_EMOTION: Array<[string, RegExp]> = [
+    // 世界书 §2.3.8：温柔/亲近 = happy + 更慢的语速、更低的音高（哄人时不能念得像播报）
+    ["gentle", /(乖|别怕|不怕|没事|我在|慢慢来|不着急|听话|哄|摸头|抱住|抱紧|轻点|轻一些)/],
     ["happy", /(哈哈|嘿嘿|嘻嘻|开心|高兴|太好了|好耶|么么|抱抱|亲亲|喜欢|笑死)/],
     ["sad", /(呜呜|难过|伤心|悲伤|失落|沮丧|想哭|哭了|舍不得)/],
     ["angry", /(生气|愤怒|恼火|火大|混蛋|讨厌|烦死|凭什么|闭嘴)/],
@@ -299,6 +327,7 @@ export function addMinimaxBreathMarks(text: string): string {
 // 拖腔下沉、惊讶是骤升。只给一个 emotion 参数，音色对了但语速节奏还是匀速念稿。
 // 这里按情绪表带一点 speed/pitch 偏移，只在用户没手工调过时生效（用户调过的优先）。
 const MINIMAX_EMOTION_TUNING: Record<string, { speed: number; pitch: number }> = {
+    gentle: { speed: 0.9, pitch: -1 },
     happy: { speed: 1.05, pitch: 1 },
     sad: { speed: 0.9, pitch: -1 },
     angry: { speed: 0.95, pitch: -1 },
@@ -313,7 +342,10 @@ async function synthesizeMinimax(text: string, config: VoiceApiConfig, emotion?:
 
     const normalizedEmotion = emotion?.trim().toLowerCase();
     const tuning = normalizedEmotion ? MINIMAX_EMOTION_TUNING[normalizedEmotion] : undefined;
-    const useEmotion = !!normalizedEmotion && MINIMAX_EMOTIONS.has(normalizedEmotion);
+    // 世界书 §2.3.8 的"温柔"没有对应 emotion 取值：拿到 happy 的柔和基线，
+    // 再用 tuning 把语速压慢、音高压低，避免把哄人的话念成播报腔。
+    const sentEmotion = normalizedEmotion === "gentle" ? "happy" : normalizedEmotion;
+    const useEmotion = !!sentEmotion && MINIMAX_EMOTIONS.has(sentEmotion);
 
     const baseUrl = (config.baseUrl || "https://api.minimaxi.com/v1").replace(/\/$/, "");
     const voiceSetting: Record<string, unknown> = {
@@ -338,7 +370,7 @@ async function synthesizeMinimax(text: string, config: VoiceApiConfig, emotion?:
             text,
             stream: false,
             ...(config.languageBoost ? { language_boost: config.languageBoost } : {}),
-            voice_setting: withEmotion && useEmotion ? { ...voiceSetting, emotion: normalizedEmotion } : voiceSetting,
+            voice_setting: withEmotion && useEmotion ? { ...voiceSetting, emotion: sentEmotion } : voiceSetting,
             // 44100/256k 是 Minimax 支持的最高档;之前 32000/128k 会把 hd 模型
             // 的输出压闷(用户反馈"声音糊"),各模型均支持该档位。
             audio_setting: {

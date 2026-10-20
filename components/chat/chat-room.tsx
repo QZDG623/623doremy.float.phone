@@ -164,9 +164,15 @@ const OfflineAssistantTextBlock = memo(function OfflineAssistantTextBlock({
     text: string;
     defaultExpanded: boolean;
 }) {
-    const paragraphs = useMemo(() => splitOfflineParagraphs(text), [text]);
-    if (paragraphs.length <= 1) {
-        return <BilingualTextBlock text={text} mode="markdown" defaultExpanded={defaultExpanded} htmlFrameVariant="offline" />;
+    // 线下模式是独立渲染路径（不走 MessageBubble），过去直接把原始正文丢给 Markdown：
+    // 模型写在气泡里的灰色旁白 HTML、`(breath)` 之类 Sound Tag 会原样显示。
+    // 这里逐段清洗，纯旁白段直接丢掉——整条都是旁白时返回 null，不占位。
+    const paragraphs = useMemo(() => splitOfflineParagraphs(text)
+        .map(paragraph => normalizeTextBubbleContent(paragraph))
+        .filter(Boolean), [text]);
+    if (paragraphs.length === 0) return null;
+    if (paragraphs.length === 1) {
+        return <BilingualTextBlock text={paragraphs[0]} mode="markdown" defaultExpanded={defaultExpanded} htmlFrameVariant="offline" />;
     }
     return (
         <div className="chat-offline-paragraph-stack">
@@ -288,12 +294,15 @@ function isHiddenChatFlowMessage(msg: ChatMessage, displayContent?: string): boo
     // 状态栏/内心独白/思维链挂在这条消息上时仍要显示，否则面板会跟着消失。
     const plainOrVoice = !msg.mediaType || msg.mediaType === "audio";
     const rawContent = displayContent ?? msg.content;
+    // 语音条的正文字段是空的，要念的内容都在 mediaData.label 里——判"是不是纯旁白"
+    // 必须看 label，否则 `[语音条:(breath)]` 这种会留下一个不会说话的语音气泡。
+    const speechSource = msg.mediaType === "audio" ? (msg.mediaData?.label || rawContent) : rawContent;
     if (msg.role !== "user"
         && plainOrVoice
         && !msg.statusPanel
         && !msg.innerMonologue
         && !msg.reasoningText
-        && isNonDialogueOnlyContent(rawContent)
+        && isNonDialogueOnlyContent(speechSource)
         && !isStandaloneHtmlPreviewContent(rawContent)) {
         return true;
     }
@@ -5921,6 +5930,11 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                         {visibleOfflineTurns.map((turn, turnIdx) => {
                             const offlineDisplay = offlineDisplayByTurnId.get(turn.id) ?? getOfflineDisplayText(turn);
                             const assistantHasHtmlPreview = hasOfflineHtmlPreview(offlineDisplay.assistantContent);
+                            // 整轮回复只有旁白/动作/Sound Tag 时不渲染助手条目——否则会留下
+                            // 一个只有头像和名字、没有台词的空条目。
+                            const assistantOnlyPerformance = !normalizeTextBubbleContent(offlineDisplay.assistantContent)
+                                && !turn.summary.trim()
+                                && !(turn.thinkingText || turn.reasoningText);
                             const prevTime = turnIdx > 0 ? visibleOfflineTurns[turnIdx - 1].createdAt : null;
                             const showTime = !prevTime || shouldShowTimestamp(turn.createdAt, prevTime);
                             return (
@@ -5957,7 +5971,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                                         />
                                     </div>
                                 </div>
-                                <div className="chat-offline-entry" data-role="assistant">
+                                <div className="chat-offline-entry" data-role="assistant" style={assistantOnlyPerformance ? { display: "none" } : undefined}>
                                     {/* 头像占位：默认 display:none（见 chat.css），供自定义 CSS 显示 */}
                                     <div className="chat-offline-avatar" aria-hidden="true">
                                         {character?.avatar ? <img src={character.avatar} alt="" /> : <ChatFallbackAvatar />}

@@ -132,7 +132,7 @@ export const MessageBubble = memo(function MessageBubble({ msg, onUpdate, charNa
             if (msg.mediaType?.startsWith("plugin:")) {
                 return <PluginKindBubble msg={msg} kind={msg.mediaType.slice("plugin:".length)} />;
             }
-            const textBubble = <TextBubble content={displayContent ?? msg.content} onActionSelect={onActionSelect} defaultTranslationExpanded={defaultTranslationExpanded} />;
+            const textBubble = <TextBubble content={displayContent ?? msg.content} stripPerformance={msg.role !== "user"} onActionSelect={onActionSelect} defaultTranslationExpanded={defaultTranslationExpanded} />;
             return (
                 <>
                     {textBubble}
@@ -265,7 +265,9 @@ const PERFORMANCE_HINT_RE = /<[a-zA-Z][^>]*>|\((?:laughs|chuckle|coughs|clear-th
 export function normalizeTextBubbleContent(content: string): string {
     // 表演指令（灰色旁白 HTML 块、(breath) 等 Sound Tag）不该出现在气泡里。
     // 这里是最外层渲染入口，所以历史里已经存下的旧消息也一并被清掉。
-    const base = PERFORMANCE_HINT_RE.test(content) ? stripPerformanceShells(content) : content;
+    // 旁白 HTML 有时是转义过的（`&lt;span style=…&gt;`），判特征前先还原，否则会漏判。
+    const hintSource = content.replace(/&lt;/gi, "<").replace(/&gt;/gi, ">");
+    const base = PERFORMANCE_HINT_RE.test(hintSource) ? stripPerformanceShells(content) : content;
     const cleaned = base
         .replace(/\[音乐(?:分享)?(?:[：:][^\]]*)?\]/g, "")
         .replace(/\[[^\]]+拍了拍[^\]]+\]/g, "")
@@ -715,8 +717,13 @@ export const BilingualTextBlock = memo(function BilingualTextBlock({
     );
 });
 
-function TextBubble({ content, onActionSelect, defaultTranslationExpanded = false }: { content: string; onActionSelect?: (text: string) => void; defaultTranslationExpanded?: boolean }) {
-    return <BilingualTextBlock text={content} onActionSelect={onActionSelect} mode="markdown" defaultExpanded={defaultTranslationExpanded} />;
+function TextBubble({ content, onActionSelect, defaultTranslationExpanded = false, stripPerformance = true }: { content: string; onActionSelect?: (text: string) => void; defaultTranslationExpanded?: boolean; stripPerformance?: boolean }) {
+    // 双保险：调用方可能直接传原始正文（线下模式、群聊动作消息等），这里再清一遍，
+    // 保证灰色旁白 HTML 与 (breath) 这类 Sound Tag 永远不会出现在气泡里。
+    // 用户自己打的字不清洗——那是他的原话，括号也可能是正常内容。
+    const cleaned = stripPerformance ? normalizeTextBubbleContent(content) : content;
+    if (!cleaned) return null;
+    return <BilingualTextBlock text={cleaned} onActionSelect={onActionSelect} mode="markdown" defaultExpanded={defaultTranslationExpanded} />;
 }
 
 // ── Red Packet ─────────────────────────────
@@ -2377,7 +2384,15 @@ function VoiceMessageBubble({ msg, characterId, onUpdate, defaultTranslationExpa
     const speechText = text;
     const synthesizedFromText = msg.mediaData?.synthesizedFromText;
     const needsResynthesis = msg.role !== "user" && synthesizedFromText !== speechText;
-    const duration = msg.mediaData?.voiceDuration || Math.max(2, Math.ceil(speechText.replace(/\((?:breath|sighs|sniffs|gasp|exhale|inhale|pant|chuckle|laughs)\)/gi, "").length / 4));
+    // 时长只按"真正会被念出来的字"估算：Sound Tag / 停顿标记不占播放时间。
+    const estimatedDuration = Math.max(2, Math.ceil(speechText
+        .replace(/<\s*#[0-9.]+\s*#\s*>/g, "")
+        .replace(/\((?:breath|sighs|sniffs|gasp|exhale|inhale|pant|chuckle|laughs|lip-smacking|emm|pant|groans|snorts|coughs|clear-throat|hissing|humming|burps|sneezes)\)/gi, "")
+        .length / 4));
+    // 旧语音条的 voiceDuration 是按脏 label（含整串 CSS 旁白）算出来的——"很短一句话
+    // 却显示 45 秒"就是它。只要这条语音待重合成，就不再拿旧时长误导用户。
+    const storedDuration = typeof msg.mediaData?.voiceDuration === "number" ? msg.mediaData.voiceDuration : 0;
+    const duration = needsResynthesis || !storedDuration ? estimatedDuration : storedDuration;
 
     const playSrc = (src: string) => {
         // 必须用 <audio> 元素:iOS 静音拨键会掐掉 Web Audio 的输出(表现为全线
@@ -2419,7 +2434,7 @@ function VoiceMessageBubble({ msg, characterId, onUpdate, defaultTranslationExpa
         setSynthFailed(false);
         synthesizeVoiceForMessage(msg.id, characterId, speechText)
             .then((dataUrl) => {
-                if (onUpdate) onUpdate({ ...msg, mediaUrl: dataUrl, mediaData: { ...msg.mediaData, synthesizedFromText: speechText } });
+                if (onUpdate) onUpdate({ ...msg, mediaUrl: dataUrl, mediaData: { ...msg.mediaData, synthesizedFromText: speechText, voiceDuration: estimatedDuration } });
                 if (!mountedRef.current) return;
                 setSynthesizing(false);
                 playSrc(dataUrl);
