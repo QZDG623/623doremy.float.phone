@@ -151,7 +151,15 @@ export function sanitizeSpeechText(raw: string, options?: { keepSoundTags?: bool
     // 2a. MiniMax 停顿标记 <#0.3#> —— 长得像 HTML 标签，必须先摘出来
     text = text.replace(/<\s*#[0-9.]+\s*#\s*>/g, stash);
     // 2b. 官方 Sound Tag（世界书用英文半角括号写标签，如 (breath)）
-    if (keepSoundTags) text = text.replace(MINIMAX_SOUND_TAG_RE, m => stash(m.toLowerCase()));
+    if (keepSoundTags) {
+        // 模型偶尔会写成全角括号（breath）——先归一成半角，否则第 4 步会把整段
+        // 括号当旁白删掉，本该演出来的呼吸/笑意就没了。
+        text = text.replace(
+            new RegExp(`（\\s*(${MINIMAX_SOUND_TAGS.join("|")})\\s*）`, "gi"),
+            (_, tag: string) => `(${tag.toLowerCase()})`,
+        );
+        text = text.replace(MINIMAX_SOUND_TAG_RE, m => stash(m.toLowerCase()));
+    }
 
     // 3. 剥掉所有 HTML 标签 —— style 属性里的整串 CSS 英文随之消失（"大段英文"的根源）
     text = text.replace(/<[^>]*>/g, " ");
