@@ -46,6 +46,9 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import java.io.File
 import java.io.FileOutputStream
+import java.io.OutputStream
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Float 小手机安卓壳：全屏 WebView 直接加载线上站点。
@@ -87,6 +90,13 @@ class MainActivity : AppCompatActivity() {
 
     /** 设备动作桥：让网页（进而让角色）在真实手机上做一件小事（边界说明见 DeviceActionBridge）。 */
     private val deviceAction by lazy { DeviceActionBridge(this) }
+
+    /**
+     * 分块落盘会话：网页把大文件（备份 ZIP 等）切成若干 base64 分片逐片推过来，
+     * 壳按 sessionId 持有 OutputStream，写完最后一片再落盘。避免把整个文件转成
+     * 一个 base64 字符串——800MB 的备份会变成 1GB+ 的 JS 字符串，直接卡死。
+     */
+    private val chunkedFileSessions = ConcurrentHashMap<String, ChunkedFileSession>()
 
     /** 日历桥：让角色看见用户的真实日程，也能把纪念日写进系统日历（边界说明见 CalendarBridge）。 */
     private val calendar by lazy { CalendarBridge(this) }
@@ -547,6 +557,14 @@ class MainActivity : AppCompatActivity() {
         webView.destroy()
         super.onDestroy()
     }
+
+    /** 分块落盘会话：一次 startChunkedFile 对应一条记录，写完 finish 后移除。 */
+    private data class ChunkedFileSession(
+        val uri: Uri,
+        val outputStream: OutputStream,
+        /** Android 9 及以下走的是 FileOutputStream，结束时要单独关。 */
+        val filePath: File? = null,
+    )
 
     /** 暴露给网页的原生桥（网页侧可用 window.AndroidShell 特性检测壳环境）。 */
     inner class ShellBridge {
@@ -1236,6 +1254,83 @@ class MainActivity : AppCompatActivity() {
                 val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
                 if (!dir.exists()) dir.mkdirs()
                 FileOutputStream(File(dir, safeName)).use { it.write(bytes) }
+            }
+            true
+        }.getOrDefault(false)
+
+        /**
+         * 开始一次分块落盘：在「下载」目录创建一个 IS_PENDING 的占位文件并打开输出流。
+         * 返回 sessionId；后续 writeChunk 用这个 id 追加内容，finishChunkedFile 收尾。
+         * 失败返回空串。
+         *
+         * 为什么需要分块：备份 ZIP 能到 800MB+，若整文件转 base64 再传给壳，JS 侧
+         * 会持有一份 1GB+ 的字符串，直接 OOM 卡死。改成每片 4-8MB 逐片传，壳侧每片
+         * 解码后立刻写盘释放，峰值内存只跟分片大小走。
+         */
+        @JavascriptInterface
+        fun startChunkedFile(fileName: String): String = runCatching {
+            val safeName = fileName
+                .replace(Regex("[\\\\/:*?\"<>|]"), "_")
+                .trim()
+                .ifBlank { "download" }
+                .take(120)
+            val sessionId = UUID.randomUUID().toString()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, safeName)
+                    put(MediaStore.Downloads.MIME_TYPE, guessMimeType(safeName))
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+                val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    ?: return@runCatching ""
+                val outputStream = contentResolver.openOutputStream(uri)
+                    ?: return@runCatching ""
+                chunkedFileSessions[sessionId] = ChunkedFileSession(uri, outputStream)
+            } else {
+                @Suppress("DEPRECATION")
+                val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                if (!dir.exists()) dir.mkdirs()
+                val file = File(dir, safeName)
+                val outputStream = FileOutputStream(file)
+                // 9 及以下没有 IS_PENDING，先用 Uri.fromFile 占位，finish 时再通知扫描。
+                chunkedFileSessions[sessionId] = ChunkedFileSession(Uri.fromFile(file), outputStream, file)
+            }
+            sessionId
+        }.getOrDefault("")
+
+        /** 追加一个 base64 分片（单线程顺序调用即可，内部不做并发保护）。 */
+        @JavascriptInterface
+        fun writeChunk(sessionId: String, base64Chunk: String): Boolean = runCatching {
+            val session = chunkedFileSessions[sessionId] ?: return@runCatching false
+            val bytes = Base64.decode(base64Chunk, Base64.DEFAULT)
+            session.outputStream.write(bytes)
+            true
+        }.getOrDefault(false)
+
+        /** 收尾：关流、去掉 IS_PENDING 标记（文件在系统下载目录里正式可见）。 */
+        @JavascriptInterface
+        fun finishChunkedFile(sessionId: String): Boolean = runCatching {
+            val session = chunkedFileSessions.remove(sessionId) ?: return@runCatching false
+            session.outputStream.flush()
+            session.outputStream.close()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.IS_PENDING, 0)
+                }
+                contentResolver.update(session.uri, values, null, null)
+            }
+            true
+        }.getOrDefault(false)
+
+        /** 中断：关流并删除已写入的占位文件（网页侧出错时调用，避免残留半成品）。 */
+        @JavascriptInterface
+        fun abortChunkedFile(sessionId: String): Boolean = runCatching {
+            val session = chunkedFileSessions.remove(sessionId) ?: return@runCatching false
+            runCatching { session.outputStream.close() }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                contentResolver.delete(session.uri, null, null)
+            } else {
+                session.filePath?.delete()
             }
             true
         }.getOrDefault(false)

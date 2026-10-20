@@ -1,6 +1,8 @@
 export type DownloadFileOptions = {
     disableNativeShare?: boolean;
     nativeShareOnly?: boolean;
+    /** 大文件分块落盘时的进度回调（已写字节 / 总字节）；非分块路径不触发。 */
+    onProgress?: (loaded: number, total: number) => void;
 };
 
 /** android-shell 壳的 WebView UA 后缀标识（见 MainActivity.kt 的 userAgentString 拼接）。 */
@@ -9,6 +11,14 @@ const FLOAT_SHELL_UA_MARK = "FloatShell/";
 /** 壳暴露的原生桥（能力按需特性检测，非壳环境为 undefined）。 */
 type FloatShellBridge = {
     saveBase64File?: (fileName: string, base64: string) => boolean;
+    /** 分块落盘：开始一次会话，返回 sessionId（失败返回空串）。 */
+    startChunkedFile?: (fileName: string) => string;
+    /** 分块落盘：追加一个 base64 分片。 */
+    writeChunk?: (sessionId: string, base64Chunk: string) => boolean;
+    /** 分块落盘：收尾（关流 + 取消 IS_PENDING）。 */
+    finishChunkedFile?: (sessionId: string) => boolean;
+    /** 分块落盘：中断并删除已写入的占位文件。 */
+    abortChunkedFile?: (sessionId: string) => boolean;
     openUrl?: (url: string) => boolean;
     launchExternalApp?: (packageName: string, dataUrl: string) => boolean;
     /** 直链交给系统下载管理器（真后台）；返回是否成功入队 */
@@ -103,17 +113,33 @@ export async function downloadFile(blob: Blob, filename: string, options: Downlo
     }
 
     // 壳环境：blob: + a[download] 在 WebView 里不会落盘（DownloadManager 取不到内存地址），
-    // 必须把内容 base64 交给壳从 MediaStore 写进公共「下载」目录。落盘失败再退回浏览器做法。
+    // 必须把内容交给壳从 MediaStore 写进公共「下载」目录。
+    // 优先走分块路径（大文件不卡），老壳没有分块 API 时退回一次性 base64，再失败退回浏览器做法。
     const shell = readFloatShellBridge();
-    if (shell?.saveBase64File) {
-        try {
-            const base64 = await blobToBase64(blob);
-            if (shell.saveBase64File(filename, base64)) {
-                setTimeout(() => URL.revokeObjectURL(url), 1000);
-                return;
+    if (shell) {
+        // 1) 分块落盘：任何大小都走这，峰值内存只跟单片走，还能上报进度。
+        if (shell.startChunkedFile && shell.writeChunk && shell.finishChunkedFile) {
+            try {
+                if (await downloadFileChunkedInShell(blob, filename, options.onProgress)) {
+                    setTimeout(() => URL.revokeObjectURL(url), 1000);
+                    return;
+                }
+            } catch {
+                // 落到下面的兜底
             }
-        } catch {
-            // 交给下面的浏览器兜底路径
+        }
+        // 2) 一次性 base64：仅给小文件/老壳兜底。大文件这里会卡死，但总比导不出来强，
+        //    调用方应通过特性检测在 UI 上提示用户升级壳。
+        if (shell.saveBase64File) {
+            try {
+                const base64 = await blobToBase64(blob);
+                if (shell.saveBase64File(filename, base64)) {
+                    setTimeout(() => URL.revokeObjectURL(url), 1000);
+                    return;
+                }
+            } catch {
+                // 交给下面的浏览器兜底路径
+            }
         }
     }
 
@@ -133,6 +159,55 @@ function blobToBase64(blob: Blob): Promise<string> {
         reader.onerror = () => reject(reader.error ?? new Error("读取文件内容失败"));
         reader.readAsDataURL(blob);
     });
+}
+
+/**
+ * 每片原始字节数：base64 后约 4/3 倍。8MB 原始 → ~10.7MB base64 字符串，
+ * 对 JS 堆和 JNI 传参都很安全；850MB 文件约 107 片，逐片 await 不会卡 UI。
+ */
+const CHUNK_DOWNLOAD_BYTES = 8 * 1024 * 1024;
+
+/**
+ * 壳环境分块落盘：把 Blob 切成 8MB 小片，逐片 base64 后调用
+ * AndroidShell.writeChunk 追加写入。避免整文件 base64（850MB → 1.1GB 字符串）
+ * 把 WebView 撑爆。返回是否成功落盘；失败/不支持时返回 false，调用方走兜底。
+ */
+async function downloadFileChunkedInShell(
+    blob: Blob,
+    filename: string,
+    onProgress?: (loaded: number, total: number) => void,
+): Promise<boolean> {
+    const shell = readFloatShellBridge();
+    if (!shell?.startChunkedFile || !shell.writeChunk || !shell.finishChunkedFile) return false;
+
+    const sessionId = shell.startChunkedFile(filename);
+    if (!sessionId) return false;
+
+    try {
+        let offset = 0;
+        const total = blob.size;
+        while (offset < total) {
+            const end = Math.min(offset + CHUNK_DOWNLOAD_BYTES, total);
+            const slice = blob.slice(offset, end);
+            const base64 = await blobToBase64(slice);
+            if (!shell.writeChunk(sessionId, base64)) {
+                throw new Error("分片写入失败");
+            }
+            offset = end;
+            onProgress?.(offset, total);
+            // 让出事件循环：几百次 await 中插一次 setTimeout，避免长时间占满主线程导致界面假死。
+            if (offset % (CHUNK_DOWNLOAD_BYTES * 4) === 0) {
+                await new Promise((r) => setTimeout(r, 0));
+            }
+        }
+        if (!shell.finishChunkedFile(sessionId)) {
+            throw new Error("收尾落盘失败");
+        }
+        return true;
+    } catch (error) {
+        shell.abortChunkedFile?.(sessionId);
+        throw error;
+    }
 }
 
 /**
