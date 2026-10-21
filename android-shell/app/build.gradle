@@ -39,11 +39,10 @@ android {
         // 覆盖安装后照例清一次网页缓存，避免设备上残留旧的 JS / Service Worker。
         // 1.0.18：站点从 Netlify 迁移到 Vercel（xyzfloat.netlify.app →
         // 623doremy-float-phone.vercel.app），同 commit cab86e2。
-        // 1.0.19：终极保险 + 微信助手清洗。主 App tts-service 在
-        // synthesizeMinimax 入口加了断言（中文文本含英文/括号标签直接阻断）；
-        // Supabase Edge Function weixin-assistant 的 synthesizeMinimaxVoiceDataUrl
-        // 也接入了同一套 Sound Tag → <#x#> + stripLatinLeaks 清洗，彻底堵死所有
-        // 绕过路径。覆盖安装后照例清一次网页缓存，让 Vercel 新构建的 JS 生效。
+        // 1.0.20：彻底放弃 <#x#> 停顿标记（用户 MiniMax 账号不认），所有括号整块
+        // 删掉，官方 Sound Tag 换成中文标点（breath→逗号、sighs→省略号）。
+        // sw.js CACHE_VERSION 升到 v19 强制刷新 JS。覆盖安装后清缓存让 Vercel
+        // 新构建的括号清洗逻辑生效，不再把 (breath) 念成英文。
         versionCode 19
         versionName "1.0.20"
         buildConfigField "String", "SITE_URL", "\"${siteUrl}\""
