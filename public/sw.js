@@ -11,9 +11,12 @@
 // v18：线上实际停留在 commit 6b4ab91 的旧构建（t2a_v2 请求里仍带 (breath)，
 //      于是模型把 breath 念成英文）。本次把 Sound Tag 全换成 <#x#> 停顿、
 //      中文台词里的英文一律抹掉，连同 APK 1.0.17 重发，再清一次旧 JS。
+// v19：v18 的 <#x#> 停顿标记在用户 MiniMax 账号上被忽略，breath 仍被念成英文。
+//      本次彻底放弃括号 Sound Tag 和 <#x#>，所有括号整块删掉、官方标签换成
+//      中文标点（breath→逗号、sighs→省略号），连同 APK 1.0.20 重发。
 // 注意：这么大范围的清空会让字体/模型重新下载一轮，是刻意为之——只在
 // 修复客户端"跑旧 JS"时才升版，日常改动不要动这个数字。
-const CACHE_VERSION = "ai-phone-pwa-v18";
+const CACHE_VERSION = "ai-phone-pwa-v19";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 
