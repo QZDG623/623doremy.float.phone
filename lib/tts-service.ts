@@ -438,6 +438,18 @@ const MINIMAX_EMOTION_TUNING: Record<string, { speed: number; pitch: number }> =
 async function synthesizeMinimax(text: string, config: VoiceApiConfig, emotion?: string): Promise<Blob | null> {
     if (!config.apiKey) throw new Error("Minimax API Key 未配置");
 
+    // 终极保险：送进 MiniMax 的 text 绝不允许含英文或括号标签。
+    // 历史教训：用户反复反馈 "(breath)" 被念成英文——任何绕过清洗链的新入口
+    // 都会立刻在这里暴露并阻断，而不是默默把垃圾塞给 MiniMax 让它念出来。
+    // 纯英文角色（整句无中文）不受这条约束。
+    const hasChinese = /[\u3400-\u9fff\uf900-\ufaff]/.test(text);
+    const latinMismatch = hasChinese && /[A-Za-z]/.test(text);
+    const parenTagMismatch = hasChinese && /[（(][^）)]*[A-Za-z][^）)]*[）)]/.test(text);
+    if (latinMismatch || parenTagMismatch) {
+        console.error("[TTS 保险阻断] 送进 MiniMax 的文本含未清洗的英文/括号标签，已拒绝发送：", text.slice(0, 200));
+        return null;
+    }
+
     const normalizedEmotion = emotion?.trim().toLowerCase();
     const tuning = normalizedEmotion ? MINIMAX_EMOTION_TUNING[normalizedEmotion] : undefined;
     // 世界书 §2.3.8 的"温柔"没有对应 emotion 取值：拿到 happy 的柔和基线，

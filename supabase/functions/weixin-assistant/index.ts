@@ -1569,6 +1569,48 @@ function estimateVoiceDuration(text) {
   return Math.max(2, Math.ceil(String(text || "").length / 4));
 }
 
+
+// ── MiniMax 语音清洗（同 lib/tts-service.ts 逻辑，独立拷贝给云函数避免跨模块依赖）──
+// 背景：用户反复反馈 (breath) 被念成英文。终极不变量：送进 MiniMax t2a_v2 的 text
+// 里绝不允许含拉丁字母或括号标签；Sound Tag 全部换成 <#x#> 停顿标记。
+const _WX_MINIMAX_SOUND_TAGS = [
+  "laughs","chuckle","coughs","clear-throat","groans","breath","pant",
+  "inhale","exhale","gasp","sniffs","sighs","snorts","burps",
+  "lip-smacking","humming","hissing","emm","sneezes",
+];
+const _WX_SOUND_TAG_RE = new RegExp(
+  "\(\\s*(" + _WX_MINIMAX_SOUND_TAGS.join("|") + ")\\s*\\)", "gi"
+);
+const _WX_SOUND_TO_PAUSE = {
+  breath:"<#0.3#>", inhale:"<#0.3#>", exhale:"<#0.3#>", pant:"<#0.25#>",
+  gasp:"<#0.15#>", sighs:"<#0.5#>", sniffs:"<#0.2#>", laughs:"<#0.2#>",
+  chuckle:"<#0.2#>", coughs:"<#0.2#>", "clear-throat":"<#0.2#>",
+  groans:"<#0.3#>", snorts:"<#0.15#>", burps:"<#0.2#>",
+  "lip-smacking":"<#0.1#>", humming:"<#0.3#>", hissing:"<#0.2#>",
+  emm:"<#0.2#>", sneezes:"<#0.3#>",
+};
+const _WX_HAS_CJK = /[\u3400-\u9fff\uf900-\ufaff]/;
+
+function _wxSanitizeForMinimax(raw) {
+  if (!raw) return "";
+  let t = String(raw).trim();
+  // 1. Sound Tag → <#x#> 停顿
+  t = t.replace(_WX_SOUND_TAG_RE, (m, tag) => _WX_SOUND_TO_PAUSE[tag.toLowerCase()] || " ");
+  // 2. 中文台词里任何含英文的括号块整块删掉
+  if (_WX_HAS_CJK.test(t)) {
+    t = t.replace(/[（(][^）)]*[A-Za-z][^）)]*[）)]/g, " ");
+    t = t.replace(/[A-Za-z][A-Za-z'’.\-]*/g, " ");
+  }
+  // 3. 折叠空白
+  t = t.replace(/\s+/g, " ").trim();
+  // 4. 安全断言：送进 MiniMax 的中文文本里绝不能有英文
+  if (_WX_HAS_CJK.test(t) && /[A-Za-z]/.test(t)) {
+    console.error("[weixin-TTS] 清洗后仍含英文，已拒绝：", t.slice(0, 200));
+    return "";
+  }
+  return t;
+}
+
 // 云函数免费档墙钟上限 150s、单轮预算 120s，媒体生成超时必须压在预算内；
 // 本地助手同用此值（常见生图/TTS 服务 90s 内足够返回）。
 const TTS_TIMEOUT_MS = 60_000;
@@ -1593,6 +1635,9 @@ async function synthesizeVoiceDataUrl(text, voiceConfig) {
 async function synthesizeMinimaxVoiceDataUrl(text, config, timeoutMs = TTS_TIMEOUT_MS) {
   const apiKey = String(config.apiKey || "").trim();
   if (!apiKey) return "";
+  // 必须先清洗：把括号标签换成停顿标记、抹掉任何残留英文
+  text = _wxSanitizeForMinimax(text);
+  if (!text) return "";
   const baseUrl = String(config.baseUrl || "https://api.minimaxi.com/v1").replace(/\/+$/, "");
   const response = await fetchWithTimeout(`${baseUrl}/t2a_v2`, {
     method: "POST",
