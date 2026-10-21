@@ -46,7 +46,11 @@ export async function synthesizeSpeech(
         const performed = addMinimaxBreathMarks(speechText);
         // 调用方显式给了情绪就用它，否则按台词里的标签/关键词推断。
         const emotion = options?.emotion?.trim() || inferMinimaxEmotion(performed) || undefined;
-        return synthesizeMinimax(performed, voiceConfig, emotion);
+        // 关键：把 (breath)/(sighs) 等 Sound Tag 全部换成 <#x#> 停顿标记再发给 MiniMax。
+        // 标签在前两步已被用来补呼吸、推断情绪，这里若原样透传，部分模型会把 "breath"
+        // 当英文念出来。换成停顿标记后既不出字音，又保留换气节奏。
+        const finalText = soundTagsToPauses(performed);
+        return synthesizeMinimax(finalText, voiceConfig, emotion);
     }
 
     if (provider === "OpenAI") {
@@ -118,6 +122,55 @@ const MINIMAX_SOUND_TAGS = [
 ];
 
 const MINIMAX_SOUND_TAG_RE = new RegExp(`\\(\\s*(${MINIMAX_SOUND_TAGS.join("|")})\\s*\\)`, "gi");
+
+/**
+ * 官方 Sound Tag → MiniMax 停顿标记 <#x#>（单位：秒）映射。
+ *
+ * 背景：世界书 §7.1 把 (breath)/(sighs)/(chuckle) 等定义为"表演指令"，模型本该
+ * 把它们演绎成呼吸/笑意而非字音。但实测部分账号/模型版本不再识别括号标签，会把
+ * "breath" 当英文单词念出来（用户截图：语音条 label 直接是 "(breath) 再不起床…"）。
+ * 唯一可靠的兜底是把所有括号标签换成 MiniMax 官方支持的 <#x#> 停顿标记——
+ * 既不会被念成字音，又在语义边界留下真人换气的留白，保住"活人感"。
+ *
+ * 映射原则：
+ *  - 呼吸类（breath/inhale/exhale/pant）→ 中等停顿，模拟换气
+ *  - 叹气/呻吟（sighs/groans）→ 较长停顿，带情绪拖腔
+ *  - 吸气/喷鼻（gasp/snorts）→ 短促停顿
+ *  - 笑声/清嗓/咳嗽（laughs/chuckle/coughs/clear-throat）→ 短停顿，情绪由 emotion 参数兜底
+ *  - 其余 → 短停顿或直接抹掉，绝不让标签变成字音
+ */
+const MINIMAX_SOUND_TAG_TO_PAUSE: Record<string, string> = {
+    breath: "<#0.3#>",
+    inhale: "<#0.3#>",
+    exhale: "<#0.3#>",
+    pant: "<#0.25#>",
+    gasp: "<#0.15#>",
+    sighs: "<#0.5#>",
+    sniffs: "<#0.2#>",
+    laughs: "<#0.2#>",
+    chuckle: "<#0.2#>",
+    coughs: "<#0.2#>",
+    "clear-throat": "<#0.2#>",
+    groans: "<#0.3#>",
+    snorts: "<#0.15#>",
+    burps: "<#0.2#>",
+    "lip-smacking": "<#0.1#>",
+    humming: "<#0.3#>",
+    hissing: "<#0.2#>",
+    emm: "<#0.2#>",
+    sneezes: "<#0.3#>",
+};
+
+/**
+ * 把台词里所有 MiniMax 官方 Sound Tag 替换成 <#x#> 停顿标记。
+ * 必须在 addMinimaxBreathMarks / inferMinimaxEmotion 之后、发送给 MiniMax 之前调用：
+ * 前两者依赖标签做情绪推断与补呼吸标记，这里再统一抹成停顿，避免被模型当英文念出。
+ */
+function soundTagsToPauses(text: string): string {
+    return text.replace(MINIMAX_SOUND_TAG_RE, (_, tag: string) => {
+        return MINIMAX_SOUND_TAG_TO_PAUSE[tag.toLowerCase()] || "";
+    });
+}
 
 /**
  * 语音世界书 §7.2 非官方/不适配标签替换表。
