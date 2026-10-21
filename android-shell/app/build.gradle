@@ -6,7 +6,7 @@ plugins {
 // 签名：CI 里通过环境变量注入 keystore（见 android-shell/README.md）；
 // 没有配置时 release 构建产出未签名 APK，debug 构建始终可直接安装测试。
 def ksFile = System.getenv("SHELL_KEYSTORE_FILE")
-def siteUrl = (System.getenv("SHELL_SITE_URL") ?: "https://example.invalid").replaceAll('/+$', '')
+def siteUrl = (System.getenv("SHELL_SITE_URL")?.trim() ?: "https://623doremy-float-phone.vercel.app").replaceAll('/+$', '')
 
 android {
     namespace 'app.floatphone.shell'
@@ -37,8 +37,10 @@ android {
         // 1.0.17：语音彻底不念 (breath)。网页侧的 Sound Tag 已全换成 <#x#> 停顿、
         // 中文台词里的英文一律抹掉；旧语音条会被判定为待重合成，点一下即用干净台词重录。
         // 覆盖安装后照例清一次网页缓存，避免设备上残留旧的 JS / Service Worker。
-        versionCode 16
-        versionName "1.0.17"
+        // 1.0.18：站点从 Netlify 迁移到 Vercel（xyzfloat.netlify.app →
+        // 623doremy-float-phone.vercel.app），同 commit cab86e2。
+        versionCode 17
+        versionName "1.0.18"
         buildConfigField "String", "SITE_URL", "\"${siteUrl}\""
     }
 
