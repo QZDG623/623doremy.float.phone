@@ -1572,7 +1572,8 @@ function estimateVoiceDuration(text) {
 
 // ── MiniMax 语音清洗（同 lib/tts-service.ts 逻辑，独立拷贝给云函数避免跨模块依赖）──
 // 背景：用户反复反馈 (breath) 被念成英文。终极不变量：送进 MiniMax t2a_v2 的 text
-// 里绝不允许含拉丁字母或括号标签；Sound Tag 全部换成 <#x#> 停顿标记。
+// MiniMax speech-01 既不认 <#x#> 停顿标记也不认括号 Sound Tag，
+// 终极策略：括号整块删掉，官方 Sound Tag 换成中文标点让 MiniMax 自然断句。
 const _WX_MINIMAX_SOUND_TAGS = [
   "laughs","chuckle","coughs","clear-throat","groans","breath","pant",
   "inhale","exhale","gasp","sniffs","sighs","snorts","burps",
@@ -1581,32 +1582,36 @@ const _WX_MINIMAX_SOUND_TAGS = [
 const _WX_SOUND_TAG_RE = new RegExp(
   "\(\\s*(" + _WX_MINIMAX_SOUND_TAGS.join("|") + ")\\s*\\)", "gi"
 );
-const _WX_SOUND_TO_PAUSE = {
-  breath:"<#0.3#>", inhale:"<#0.3#>", exhale:"<#0.3#>", pant:"<#0.25#>",
-  gasp:"<#0.15#>", sighs:"<#0.5#>", sniffs:"<#0.2#>", laughs:"<#0.2#>",
-  chuckle:"<#0.2#>", coughs:"<#0.2#>", "clear-throat":"<#0.2#>",
-  groans:"<#0.3#>", snorts:"<#0.15#>", burps:"<#0.2#>",
-  "lip-smacking":"<#0.1#>", humming:"<#0.3#>", hissing:"<#0.2#>",
-  emm:"<#0.2#>", sneezes:"<#0.3#>",
-};
 const _WX_HAS_CJK = /[\u3400-\u9fff\uf900-\ufaff]/;
 
 function _wxSanitizeForMinimax(raw) {
   if (!raw) return "";
   let t = String(raw).trim();
-  // 1. Sound Tag → <#x#> 停顿
-  t = t.replace(_WX_SOUND_TAG_RE, (m, tag) => _WX_SOUND_TO_PAUSE[tag.toLowerCase()] || " ");
-  // 2. 中文台词里任何含英文的括号块整块删掉
-  if (_WX_HAS_CJK.test(t)) {
-    t = t.replace(/[（(][^）)]*[A-Za-z][^）)]*[）)]/g, " ");
-    t = t.replace(/[A-Za-z][A-Za-z'’.\-]*/g, " ");
-  }
-  // 3. 折叠空白
+  // 1. 官方 Sound Tag → 中文标点（叹气/呻吟→省略号，其他→逗号）
+  t = t.replace(_WX_SOUND_TAG_RE, (m, tag) => {
+    const tl = tag.toLowerCase();
+    if (["sighs", "groans"].includes(tl)) return "……";
+    return "，";
+  });
+  // 2. 所有括号整块删掉
+  t = t.replace(/[（(][^）)]*[）)]/g, " ");
+  t = t.replace(/\[[^\]]*\]/g, " ");
+  t = t.replace(/【[^】]*】/g, " ");
+  t = t.replace(/《[^》]*》/g, " ");
+  t = t.replace(/\{[^}]*\}/g, " ");
+  // 3. 兜底：剩余残缺括号字符全部删掉
+  t = t.replace(/[（）()【】《》〈〉\[\]{}]/g, " ");
+  // 4. 抹掉残留英文
+  if (_WX_HAS_CJK.test(t)) t = t.replace(/[A-Za-z][A-Za-z'’.\-]*/g, " ");
+  // 5. 折叠空白 & 标点规范化
   t = t.replace(/\s+/g, " ").trim();
-  // 4. 安全断言：送进 MiniMax 的中文文本里绝不能有英文
-  if (_WX_HAS_CJK.test(t) && /[A-Za-z]/.test(t)) {
-    console.error("[weixin-TTS] 清洗后仍含英文，已拒绝：", t.slice(0, 200));
-    return "";
+  t = t.replace(/(，\s*){2,}/g, "，").replace(/(…\s*){2,}/g, "……");
+  // 6. 终极安全断言：中文文本绝不能有英文或括号
+  if (_WX_HAS_CJK.test(t)) {
+    if (/[A-Za-z]/.test(t) || /[（）()【】《》〈〉\[\]{}]/.test(t)) {
+      console.error("[weixin-TTS] 清洗后仍含英文/括号，已拒绝：", t.slice(0, 200));
+      return "";
+    }
   }
   return t;
 }

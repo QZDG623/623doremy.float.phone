@@ -44,8 +44,8 @@ android {
         // Supabase Edge Function weixin-assistant 的 synthesizeMinimaxVoiceDataUrl
         // 也接入了同一套 Sound Tag → <#x#> + stripLatinLeaks 清洗，彻底堵死所有
         // 绕过路径。覆盖安装后照例清一次网页缓存，让 Vercel 新构建的 JS 生效。
-        versionCode 18
-        versionName "1.0.19"
+        versionCode 19
+        versionName "1.0.20"
         buildConfigField "String", "SITE_URL", "\"${siteUrl}\""
     }
 

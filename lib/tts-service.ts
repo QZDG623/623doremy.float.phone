@@ -47,10 +47,12 @@ export async function synthesizeSpeech(
         // 调用方显式给了情绪就用它，否则按台词里的标签/关键词推断。
         // 情绪必须在"标签还在"的时候推断，转换后就只剩停顿标记了。
         const emotion = options?.emotion?.trim() || inferMinimaxEmotion(performed) || undefined;
-        // 关键：Sound Tag 全部换成 <#x#> 停顿标记，并抹掉任何残留英文再发给 MiniMax。
-        // 标签原样透传时，部分账号/模型版本会把 "breath" 当英文单词念出来（用户实报）。
-        const finalText = stripLatinLeaks(soundTagsToPauses(performed));
-        // 抹完只剩停顿标记（整条都是表演指令）时不发请求，免得白花额度。
+        // 关键：括号内一律不得进 MiniMax TTS。
+        // MiniMax speech-01 对 <#x#> 停顿标记不认、对括号 Sound Tag 也只在部分
+        // 账号/模型上认，所以 Sound Tag → <#x#> 这条路走不通。终极策略：所有括号
+        // 整块删掉；MiniMax 官方 Sound Tag 换成中文标点让 MiniMax 自然断句产生
+        // 换气/停顿的活人感。用户自定义的动作括号直接删掉。
+        const finalText = stripBracketsWithPunctuation(performed);
         if (!hasSpeakableContent(finalText)) return null;
         return synthesizeMinimax(finalText, voiceConfig, emotion);
     }
@@ -185,20 +187,42 @@ function soundTagsToPauses(text: string): string {
  *
  * 纯英文角色（整句没有中文）不受影响，否则他们会彻底失声。
  */
-function stripLatinLeaks(text: string): string {
-    if (!text || !HAS_CHINESE_RE.test(text)) return text;
-    let out = text
-        // 括号里带英文的（不管是不是官方标签）整块删掉，连括号一起
-        .replace(/[（(][^）)]*[A-Za-z][^）)]*[）)]/g, " ")
-        // 裸露在正文里的英文单词（含连字符、撇号、小数点组合）一并抹掉
-        .replace(/[A-Za-z][A-Za-z'’.\-]*/g, " ")
-        // 方括号/花括号里剩下的碎片
-        .replace(/[[\]{}]/g, " ");
+function stripBracketsWithPunctuation(text: string): string {
+    if (!text) return "";
+    // 1. MiniMax 官方 Sound Tag → 中文标点（保留呼吸感但不用括号）
+    //    叹气/呻吟 → 省略号（情绪拖腔），吸气/喷鼻 → 逗号（短促停顿），
+    //    其他表演标签（breath/pant/inhale/exhale/laughs/chuckle/coughs/groans）
+    //    → 逗号（换气/短促停顿），情绪由 emotion 参数兜底。
+    let out = text.replace(MINIMAX_SOUND_TAG_RE, (_, tag: string) => {
+        const t = tag.toLowerCase();
+        if (["sighs", "groans"].includes(t)) return "……";
+        return "，";
+    });
+
+    // 2. 所有括号整块删掉（圆括号/方括号/中文方括号/书名号/花括号）
+    out = out
+        .replace(/[（(][^）)]*[）)]/g, " ")
+        .replace(/\[[^\]]*\]/g, " ")
+        .replace(/【[^】]*】/g, " ")
+        .replace(/《[^》]*》/g, " ")
+        .replace(/〈[^〉]*〉/g, " ")
+        .replace(/\{[^}]*\}/g, " ");
+
+    // 3. 兜底：任何剩余括号字符（残缺配对）全部删掉
+    out = out.replace(/[（）()【】《》〈〉\[\]{}]/g, " ");
+
+    // 4. 抹掉残留英文（标签碎片、CSS 残留等）
+    if (HAS_CHINESE_RE.test(out)) {
+        out = out.replace(/[A-Za-z][A-Za-z'’.\-]*/g, " ");
+    }
+
+    // 5. 折叠空白 & 标点规范化
     out = out
         .replace(/[ \t]{2,}/g, " ")
         .replace(/ ?\n ?/g, "\n")
-        .replace(/[ \t]+([，。！？、；：…）】》])/g, "$1")
-        .replace(/([（【《])[ \t]+/g, "$1")
+        .replace(/[ \t]+([，。！？、；：…])/g, "$1")
+        .replace(/(，\s*){2,}/g, "，")
+        .replace(/(…\s*){2,}/g, "……")
         .trim();
     return out;
 }
@@ -214,7 +238,7 @@ export function toMinimaxSpeakText(raw: string): string {
     const speechText = sanitizeSpeechText(raw, { keepSoundTags: true, dropLatin: true });
     if (!speechText) return "";
     if (!hasSpeakableContent(speechText)) return "";
-    return stripLatinLeaks(soundTagsToPauses(addMinimaxBreathMarks(speechText)));
+    return stripBracketsWithPunctuation(addMinimaxBreathMarks(speechText));
 }
 
 /**
@@ -438,16 +462,17 @@ const MINIMAX_EMOTION_TUNING: Record<string, { speed: number; pitch: number }> =
 async function synthesizeMinimax(text: string, config: VoiceApiConfig, emotion?: string): Promise<Blob | null> {
     if (!config.apiKey) throw new Error("Minimax API Key 未配置");
 
-    // 终极保险：送进 MiniMax 的 text 绝不允许含英文或括号标签。
-    // 历史教训：用户反复反馈 "(breath)" 被念成英文——任何绕过清洗链的新入口
-    // 都会立刻在这里暴露并阻断，而不是默默把垃圾塞给 MiniMax 让它念出来。
+    // 终极保险：送进 MiniMax 的 text 绝不允许含任何英文或括号字符。
+    // 任何绕过清洗链的新入口都会立刻在这里暴露并阻断。
     // 纯英文角色（整句无中文）不受这条约束。
     const hasChinese = /[\u3400-\u9fff\uf900-\ufaff]/.test(text);
-    const latinMismatch = hasChinese && /[A-Za-z]/.test(text);
-    const parenTagMismatch = hasChinese && /[（(][^）)]*[A-Za-z][^）)]*[）)]/.test(text);
-    if (latinMismatch || parenTagMismatch) {
-        console.error("[TTS 保险阻断] 送进 MiniMax 的文本含未清洗的英文/括号标签，已拒绝发送：", text.slice(0, 200));
-        return null;
+    if (hasChinese) {
+        const latinMismatch = /[A-Za-z]/.test(text);
+        const anyBracket = /[（）()【】《》〈〉\[\]{}]/.test(text);
+        if (latinMismatch || anyBracket) {
+            console.error("[TTS 保险阻断] 送进 MiniMax 的中文文本含未清洗的英文/括号，已拒绝发送：", text.slice(0, 200));
+            return null;
+        }
     }
 
     const normalizedEmotion = emotion?.trim().toLowerCase();
