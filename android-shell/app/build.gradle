@@ -34,8 +34,11 @@ android {
         // 旧 JS 缓存挡住。语音本身的实现仍在网页侧，壳不含网页代码。
         // 1.0.16：随线上 v17 修复重发（灰色旁白不出气泡、语音只念台词），
         // 覆盖安装后仍会清一次网页缓存。
-        versionCode 15
-        versionName "1.0.16"
+        // 1.0.17：语音彻底不念 (breath)。网页侧的 Sound Tag 已全换成 <#x#> 停顿、
+        // 中文台词里的英文一律抹掉；旧语音条会被判定为待重合成，点一下即用干净台词重录。
+        // 覆盖安装后照例清一次网页缓存，避免设备上残留旧的 JS / Service Worker。
+        versionCode 16
+        versionName "1.0.17"
         buildConfigField "String", "SITE_URL", "\"${siteUrl}\""
     }
 

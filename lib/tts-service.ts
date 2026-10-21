@@ -45,11 +45,13 @@ export async function synthesizeSpeech(
         // 角色自己没写呼吸标记时补上——匀速念完是"AI 腔"的主要来源。
         const performed = addMinimaxBreathMarks(speechText);
         // 调用方显式给了情绪就用它，否则按台词里的标签/关键词推断。
+        // 情绪必须在"标签还在"的时候推断，转换后就只剩停顿标记了。
         const emotion = options?.emotion?.trim() || inferMinimaxEmotion(performed) || undefined;
-        // 关键：把 (breath)/(sighs) 等 Sound Tag 全部换成 <#x#> 停顿标记再发给 MiniMax。
-        // 标签在前两步已被用来补呼吸、推断情绪，这里若原样透传，部分模型会把 "breath"
-        // 当英文念出来。换成停顿标记后既不出字音，又保留换气节奏。
-        const finalText = soundTagsToPauses(performed);
+        // 关键：Sound Tag 全部换成 <#x#> 停顿标记，并抹掉任何残留英文再发给 MiniMax。
+        // 标签原样透传时，部分账号/模型版本会把 "breath" 当英文单词念出来（用户实报）。
+        const finalText = stripLatinLeaks(soundTagsToPauses(performed));
+        // 抹完只剩停顿标记（整条都是表演指令）时不发请求，免得白花额度。
+        if (!hasSpeakableContent(finalText)) return null;
         return synthesizeMinimax(finalText, voiceConfig, emotion);
     }
 
@@ -170,6 +172,49 @@ function soundTagsToPauses(text: string): string {
     return text.replace(MINIMAX_SOUND_TAG_RE, (_, tag: string) => {
         return MINIMAX_SOUND_TAG_TO_PAUSE[tag.toLowerCase()] || "";
     });
+}
+
+/**
+ * 最后一道保险：中文台词里绝不允许出现任何英文。
+ *
+ * 为什么还要这一层：Sound Tag 的写法并不总能穷举——模型可能写成 (breaths)、
+ * (deep breath)、(Breathing slowly)、(sigh)… 只要漏掉一个，MiniMax 就会把那个
+ * 英文单词原样念出来（用户反复反馈的 "(breath)" 音）。与其在标签表上逐个打补丁，
+ * 不如立一条不变量：**只要这句话是中文，送进 TTS 的文本里就不允许有任何拉丁字母**。
+ * 中文台词里出现的英文动作词一定是标签/旁白，删掉它们不会损失任何该念的字。
+ *
+ * 纯英文角色（整句没有中文）不受影响，否则他们会彻底失声。
+ */
+function stripLatinLeaks(text: string): string {
+    if (!text || !HAS_CHINESE_RE.test(text)) return text;
+    let out = text
+        // 括号里带英文的（不管是不是官方标签）整块删掉，连括号一起
+        .replace(/[（(][^）)]*[A-Za-z][^）)]*[）)]/g, " ")
+        // 裸露在正文里的英文单词（含连字符、撇号、小数点组合）一并抹掉
+        .replace(/[A-Za-z][A-Za-z'’.\-]*/g, " ")
+        // 方括号/花括号里剩下的碎片
+        .replace(/[[\]{}]/g, " ");
+    out = out
+        .replace(/[ \t]{2,}/g, " ")
+        .replace(/ ?\n ?/g, "\n")
+        .replace(/[ \t]+([，。！？、；：…）】》])/g, "$1")
+        .replace(/([（【《])[ \t]+/g, "$1")
+        .trim();
+    return out;
+}
+
+/**
+ * 一条消息正文 → 最终要送给 MiniMax 念的文本。
+ *
+ * 单一出口，保证"语音条里存的文本"与"真正被念出来的文本"完全一致：
+ * 清洗（只留台词）→ 补呼吸停顿 → Sound Tag 转 <#x#> 停顿 → 抹掉残留英文。
+ * 调用方（语音条、通话、VN、故事、微信）都从这里取文本，避免各处各写一套。
+ */
+export function toMinimaxSpeakText(raw: string): string {
+    const speechText = sanitizeSpeechText(raw, { keepSoundTags: true, dropLatin: true });
+    if (!speechText) return "";
+    if (!hasSpeakableContent(speechText)) return "";
+    return stripLatinLeaks(soundTagsToPauses(addMinimaxBreathMarks(speechText)));
 }
 
 /**

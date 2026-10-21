@@ -13,7 +13,7 @@ import { MediaPreviewOverlay } from "@/components/chat/media-preview-overlay";
 import { findStickerByName } from "@/lib/sticker-data";
 import { splitBilingualText } from "@/lib/bilingual-text";
 import { isInvisibleOrWhitespaceOnly, stripPerformanceShells } from "@/lib/rich-message-parser";
-import { sanitizeSpeechText } from "@/lib/tts-service";
+import { sanitizeSpeechText, toMinimaxSpeakText } from "@/lib/tts-service";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import remarkGfm from "remark-gfm";
@@ -2380,7 +2380,11 @@ function VoiceMessageBubble({ msg, characterId, onUpdate, defaultTranslationExpa
     const bilingual = splitBilingualText(rawLabel);
     // 双语消息只念原文那半，译文本来就不该被读出来；清洗放在切分之后，
     // 免得 dropLatin 先把英文原文抹掉、把 "原文|译文" 的结构弄坏。
-    const text = sanitizeSpeechText(bilingual?.original || rawLabel, { keepSoundTags: true, dropLatin: true }) || rawLabel;
+    // 用 toMinimaxSpeakText 而不是裸的 sanitizeSpeechText：拿到的是"真正被念出来的
+    // 那一串文本"（标签已转成 <#x#> 停顿、残留英文已抹掉），存进 synthesizedFromText
+    // 后与旧录音比对不一致，旧语音条（当年把 (breath) 念成"breath"音的那批）会自动
+    // 判定为待重合成，点一下就用干净台词重录。
+    const text = toMinimaxSpeakText(bilingual?.original || rawLabel);
     const speechText = text;
     const synthesizedFromText = msg.mediaData?.synthesizedFromText;
     const needsResynthesis = msg.role !== "user" && synthesizedFromText !== speechText;
@@ -2427,6 +2431,12 @@ function VoiceMessageBubble({ msg, characterId, onUpdate, defaultTranslationExpa
             return;
         }
         if (msg.role === "user" || !characterId) {
+            if (msg.mediaUrl) playSrc(msg.mediaUrl);
+            return;
+        }
+        // 整条消息只有表演标记、没有可念的台词时，别去合成一段没人话的音频——
+        // 有历史录音就照播，没有就算了。
+        if (!speechText) {
             if (msg.mediaUrl) playSrc(msg.mediaUrl);
             return;
         }

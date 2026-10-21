@@ -8,9 +8,12 @@
 // v17：v16 那次 Netlify 构建失败、线上一直停在 v15，设备侧仍跑着旧 JS。
 //      本次连同 APK 1.0.16 一起重发，再次清空旧缓存，确保灰色旁白与
 //      (breath) 清洗真正生效。
+// v18：线上实际停留在 commit 6b4ab91 的旧构建（t2a_v2 请求里仍带 (breath)，
+//      于是模型把 breath 念成英文）。本次把 Sound Tag 全换成 <#x#> 停顿、
+//      中文台词里的英文一律抹掉，连同 APK 1.0.17 重发，再清一次旧 JS。
 // 注意：这么大范围的清空会让字体/模型重新下载一轮，是刻意为之——只在
 // 修复客户端"跑旧 JS"时才升版，日常改动不要动这个数字。
-const CACHE_VERSION = "ai-phone-pwa-v17";
+const CACHE_VERSION = "ai-phone-pwa-v18";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 
