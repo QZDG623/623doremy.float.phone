@@ -336,6 +336,8 @@ class MainActivity : AppCompatActivity() {
 
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
+                // 语音兜底闸门：拦掉发往 MiniMax 的括号标签/英文，网页是哪一版都生效。
+                TtsGuard.install()
                 if (purgeWebCachePending) purgeServiceWorkerCachesThenReload()
             }
         }
