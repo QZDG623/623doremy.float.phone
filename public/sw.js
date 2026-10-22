@@ -16,7 +16,8 @@
 //      中文标点（breath→逗号、sighs→省略号），连同 APK 1.0.20 重发。
 // 注意：这么大范围的清空会让字体/模型重新下载一轮，是刻意为之——只在
 // 修复客户端"跑旧 JS"时才升版，日常改动不要动这个数字。
-const CACHE_VERSION = "ai-phone-pwa-v19";
+// v20：收回「中文台词里的英文一律抹掉」，只删括号内容；台词正文里的英文照常念。
+const CACHE_VERSION = "ai-phone-pwa-v20";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 

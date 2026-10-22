@@ -37,7 +37,8 @@ export async function synthesizeSpeech(
 
     if (provider === "Minimax") {
         // 只念台词：先剥离 HTML/CSS 与旁白，并保留世界书的 (breath) 等 Sound Tag。
-        const speechText = sanitizeSpeechText(text, { keepSoundTags: true, dropLatin: true });
+        // dropLatin 必须为 false —— 台词正文里的英文要照常念出来。
+        const speechText = sanitizeSpeechText(text, { keepSoundTags: true, dropLatin: false });
         if (!speechText) return null;
         // 只写了 (breath)/(sighs) 之类表演标记、没有一句台词的消息不算台词
         // （聊天显示层已把这类消息整条隐藏），不该合成出一段没有人话的音频。
@@ -177,15 +178,15 @@ function soundTagsToPauses(text: string): string {
 }
 
 /**
- * 最后一道保险：中文台词里绝不允许出现任何英文。
+ * 最后一道保险：中文台词里绝不允许出现任何括号。
  *
  * 为什么还要这一层：Sound Tag 的写法并不总能穷举——模型可能写成 (breaths)、
  * (deep breath)、(Breathing slowly)、(sigh)… 只要漏掉一个，MiniMax 就会把那个
  * 英文单词原样念出来（用户反复反馈的 "(breath)" 音）。与其在标签表上逐个打补丁，
- * 不如立一条不变量：**只要这句话是中文，送进 TTS 的文本里就不允许有任何拉丁字母**。
- * 中文台词里出现的英文动作词一定是标签/旁白，删掉它们不会损失任何该念的字。
+ * 不如立一条不变量：**送进 TTS 的文本里不允许有任何括号字符**。
  *
- * 纯英文角色（整句没有中文）不受影响，否则他们会彻底失声。
+ * 注意这里【不】清理台词正文里的英文：用户明确要求台词里的英文照常念出来
+ * （"OK，我知道了" 里的 OK 必须念），只有括号里的内容不许念。
  */
 function stripBracketsWithPunctuation(text: string): string {
     if (!text) return "";
@@ -211,18 +212,16 @@ function stripBracketsWithPunctuation(text: string): string {
     // 3. 兜底：任何剩余括号字符（残缺配对）全部删掉
     out = out.replace(/[（）()【】《》〈〉\[\]{}]/g, " ");
 
-    // 4. 抹掉残留英文（标签碎片、CSS 残留等）
-    if (HAS_CHINESE_RE.test(out)) {
-        out = out.replace(/[A-Za-z][A-Za-z'’.\-]*/g, " ");
-    }
-
-    // 5. 折叠空白 & 标点规范化
+    // 4. 折叠空白 & 标点规范化（台词正文里的英文原样保留，照常念出来）
     out = out
         .replace(/[ \t]{2,}/g, " ")
         .replace(/ ?\n ?/g, "\n")
         .replace(/[ \t]+([，。！？、；：…])/g, "$1")
         .replace(/(，\s*){2,}/g, "，")
         .replace(/(…\s*){2,}/g, "……")
+        // 括号删掉后在句首/句尾留下的孤立逗号一并去掉
+        .replace(/^[，、；：\s]+/, "")
+        .replace(/[，、；：\s]+$/, "")
         .trim();
     return out;
 }
@@ -235,7 +234,7 @@ function stripBracketsWithPunctuation(text: string): string {
  * 调用方（语音条、通话、VN、故事、微信）都从这里取文本，避免各处各写一套。
  */
 export function toMinimaxSpeakText(raw: string): string {
-    const speechText = sanitizeSpeechText(raw, { keepSoundTags: true, dropLatin: true });
+    const speechText = sanitizeSpeechText(raw, { keepSoundTags: true, dropLatin: false });
     if (!speechText) return "";
     if (!hasSpeakableContent(speechText)) return "";
     return stripBracketsWithPunctuation(addMinimaxBreathMarks(speechText));
@@ -462,17 +461,12 @@ const MINIMAX_EMOTION_TUNING: Record<string, { speed: number; pitch: number }> =
 async function synthesizeMinimax(text: string, config: VoiceApiConfig, emotion?: string): Promise<Blob | null> {
     if (!config.apiKey) throw new Error("Minimax API Key 未配置");
 
-    // 终极保险：送进 MiniMax 的 text 绝不允许含任何英文或括号字符。
+    // 终极保险：送进 MiniMax 的 text 绝不允许含任何括号字符。
     // 任何绕过清洗链的新入口都会立刻在这里暴露并阻断。
-    // 纯英文角色（整句无中文）不受这条约束。
-    const hasChinese = /[\u3400-\u9fff\uf900-\ufaff]/.test(text);
-    if (hasChinese) {
-        const latinMismatch = /[A-Za-z]/.test(text);
-        const anyBracket = /[（）()【】《》〈〉\[\]{}]/.test(text);
-        if (latinMismatch || anyBracket) {
-            console.error("[TTS 保险阻断] 送进 MiniMax 的中文文本含未清洗的英文/括号，已拒绝发送：", text.slice(0, 200));
-            return null;
-        }
+    // 台词正文里的英文不拦——用户要求英文照常念出来，只有括号内不许念。
+    if (/[（）()【】《》〈〉\[\]{}]/.test(text)) {
+        console.error("[TTS 保险阻断] 送进 MiniMax 的文本含未清洗的括号，已拒绝发送：", text.slice(0, 200));
+        return null;
     }
 
     const normalizedEmotion = emotion?.trim().toLowerCase();

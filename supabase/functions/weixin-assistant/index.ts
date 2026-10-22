@@ -1582,7 +1582,6 @@ const _WX_MINIMAX_SOUND_TAGS = [
 const _WX_SOUND_TAG_RE = new RegExp(
   "\(\\s*(" + _WX_MINIMAX_SOUND_TAGS.join("|") + ")\\s*\\)", "gi"
 );
-const _WX_HAS_CJK = /[\u3400-\u9fff\uf900-\ufaff]/;
 
 function _wxSanitizeForMinimax(raw) {
   if (!raw) return "";
@@ -1601,17 +1600,15 @@ function _wxSanitizeForMinimax(raw) {
   t = t.replace(/\{[^}]*\}/g, " ");
   // 3. 兜底：剩余残缺括号字符全部删掉
   t = t.replace(/[（）()【】《》〈〉\[\]{}]/g, " ");
-  // 4. 抹掉残留英文
-  if (_WX_HAS_CJK.test(t)) t = t.replace(/[A-Za-z][A-Za-z'’.\-]*/g, " ");
+  // 4. 台词正文里的英文保留（用户要求英文照常念出来），只清括号
   // 5. 折叠空白 & 标点规范化
   t = t.replace(/\s+/g, " ").trim();
   t = t.replace(/(，\s*){2,}/g, "，").replace(/(…\s*){2,}/g, "……");
-  // 6. 终极安全断言：中文文本绝不能有英文或括号
-  if (_WX_HAS_CJK.test(t)) {
-    if (/[A-Za-z]/.test(t) || /[（）()【】《》〈〉\[\]{}]/.test(t)) {
-      console.error("[weixin-TTS] 清洗后仍含英文/括号，已拒绝：", t.slice(0, 200));
-      return "";
-    }
+  t = t.replace(/^[，、；：\s]+/, "").replace(/[，、；：\s]+$/, "");
+  // 6. 终极安全断言：文本里绝不能残留括号
+  if (/[（）()【】《》〈〉\[\]{}]/.test(t)) {
+    console.error("[weixin-TTS] 清洗后仍含括号，已拒绝：", t.slice(0, 200));
+    return "";
   }
   return t;
 }

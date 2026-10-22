@@ -45,10 +45,11 @@ android {
         // 新构建的括号清洗逻辑生效，不再把 (breath) 念成英文。
         // 1.0.21：闸门前移到壳里（TtsGuard）。线上站点可能跑旧 JS（PWA 缓存优先、
         // 或站点构建落后），旧 JS 会把 (breath) 原样送给 MiniMax，模型就念出英文。
-        // 现在在 WebView 里拦截发往 t2a_v2 的请求，括号连同内容整块删除、
-        // 中文台词里的英文一律抹掉，与网页是哪一版无关。
-        versionCode 20
-        versionName "1.0.21"
+        // 现在在 WebView 里拦截发往 t2a_v2 的请求，括号连同内容整块删除，与网页是哪一版无关。
+        // 1.0.22：收回「中文台词里的英文一律抹掉」——用户要求台词正文里的英文照常念出来，
+        // 只有括号里的内容不许念。闸门与网页清洗链都改成只删括号。
+        versionCode 21
+        versionName "1.0.22"
         buildConfigField "String", "SITE_URL", "\"${siteUrl}\""
     }
 
