@@ -219,6 +219,9 @@ function stripBracketsWithPunctuation(text: string): string {
         .replace(/[ \t]+([，。！？、；：…])/g, "$1")
         .replace(/(，\s*){2,}/g, "，")
         .replace(/(…\s*){2,}/g, "……")
+        // 括号换来的逗号如果紧跟在句末标点后面就是多余的（"小笨蛋。，" → "小笨蛋。"）
+        .replace(/([。！？…])\s*[，、；：]+/g, "$1")
+        .replace(/[，、；：]+\s*([。！？])/g, "$1")
         // 括号删掉后在句首/句尾留下的孤立逗号一并去掉
         .replace(/^[，、；：\s]+/, "")
         .replace(/[，、；：\s]+$/, "")

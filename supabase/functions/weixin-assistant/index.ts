@@ -1604,6 +1604,7 @@ function _wxSanitizeForMinimax(raw) {
   // 5. 折叠空白 & 标点规范化
   t = t.replace(/\s+/g, " ").trim();
   t = t.replace(/(，\s*){2,}/g, "，").replace(/(…\s*){2,}/g, "……");
+  t = t.replace(/([。！？…])\s*[，、；：]+/g, "$1").replace(/[，、；：]+\s*([。！？])/g, "$1");
   t = t.replace(/^[，、；：\s]+/, "").replace(/[，、；：\s]+$/, "");
   // 6. 终极安全断言：文本里绝不能残留括号
   if (/[（）()【】《》〈〉\[\]{}]/.test(t)) {
