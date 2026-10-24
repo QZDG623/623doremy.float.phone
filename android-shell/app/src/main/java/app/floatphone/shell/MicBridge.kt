@@ -119,14 +119,12 @@ class MicBridge(private val context: Context) {
             errorText = "AudioRecord 初始化失败（可能被其他应用占用）$lastInitError"
             return errorText
         }
-        if (rec.startRecording() != AudioRecord.SUCCESS) {
-            rec.release()
+        // startRecording() 是 void：成功与否只能看 recordingState，
+        // 失败时它自己会抛 IllegalStateException。
+        val started = runCatching { rec.startRecording() }.isSuccess
+        if (!started || rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+            runCatching { rec.release() }
             errorText = "无法开始录音（设备被占用）"
-            return errorText
-        }
-        if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-            rec.release()
-            errorText = "录音未真正启动"
             return errorText
         }
 
