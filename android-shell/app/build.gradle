@@ -48,8 +48,9 @@ android {
         // 现在在 WebView 里拦截发往 t2a_v2 的请求，括号连同内容整块删除，与网页是哪一版无关。
         // 1.0.22：收回「中文台词里的英文一律抹掉」——用户要求台词正文里的英文照常念出来，
         // 只有括号里的内容不许念。闸门与网页清洗链都改成只删括号。
-        versionCode 24
-        versionName "1.0.25"
+        // 1.0.26：修复免提录音录不到声音（AudioContext 挂起）+ 自动搭话面板铺满可滚动。
+        versionCode 25
+        versionName "1.0.26"
         buildConfigField "String", "SITE_URL", "\"${siteUrl}\""
     }
 

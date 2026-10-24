@@ -673,7 +673,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
         } else {
             continuousVoice.stop();
         }
-    }, [holdToTalk, callState, inputMode, isMuted, minimized, continuousVoice]);
+    }, [holdToTalk, callState, inputMode, isMuted, minimized, continuousVoice.start, continuousVoice.stop, continuousVoice.setMuted]);
 
     const handleInputModeToggle = useCallback(() => {
         if (androidTextInputOnly) {
@@ -693,7 +693,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
         } else {
             setInputMode("voice");
         }
-    }, [androidTextInputOnly, inputMode, continuousVoice]);
+    }, [androidTextInputOnly, inputMode, continuousVoice.stop]);
 
     const handleTextSubmit = useCallback(() => {
         const text = typedText.trim();
@@ -1130,9 +1130,29 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
             {/* 免提提示行：连续监听模式下告诉用户可以直接说话 */}
             {holdToTalk && inputMode === "voice" && callState !== "CONNECTING" && callState !== "ENDED" && (
                 <div className="text-center ts-12 opacity-80 px-5 relative z-[1]">
-                    {continuousVoice.state === "transcribing" ? "识别中…"
-                        : continuousVoice.state === "speaking" ? "正在聆听…"
-                        : continuousVoice.error || "直接说话即可，无需按住"}
+                    <div>
+                        {continuousVoice.state === "transcribing" ? "识别中…"
+                            : continuousVoice.state === "speaking" ? "正在聆听…"
+                            : continuousVoice.error || "直接说话即可，无需按住"}
+                    </div>
+                    {/* 收音电平：手机上没法看控制台，这几格能直接看出麦克风有没有在收音 */}
+                    {!continuousVoice.error && (
+                        <div className="flex items-center justify-center gap-[3px] mt-1" aria-hidden="true">
+                            {[0.02, 0.05, 0.09, 0.16, 0.28].map((threshold, index) => (
+                                <span
+                                    key={threshold}
+                                    style={{
+                                        width: 4,
+                                        height: 6 + index * 3,
+                                        borderRadius: 2,
+                                        background: continuousVoice.level >= threshold
+                                            ? "currentColor"
+                                            : "rgba(255,255,255,0.2)",
+                                    }}
+                                />
+                            ))}
+                        </div>
+                    )}
                 </div>
             )}
 

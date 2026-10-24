@@ -459,7 +459,7 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
         } else {
             continuousVoice.stop();
         }
-    }, [holdToTalk, callState, inputMode, isMuted, continuousVoice]);
+    }, [holdToTalk, callState, inputMode, isMuted, continuousVoice.start, continuousVoice.stop, continuousVoice.setMuted]);
 
     const handleInputModeToggle = useCallback(() => {
         if (androidTextInputOnly) {
@@ -479,7 +479,7 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
         } else {
             setInputMode("voice");
         }
-    }, [androidTextInputOnly, inputMode, continuousVoice]);
+    }, [androidTextInputOnly, inputMode, continuousVoice.stop]);
 
     const handleTextSubmit = useCallback(() => {
         const text = typedText.trim();

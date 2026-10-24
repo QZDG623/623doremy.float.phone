@@ -20,7 +20,9 @@
 // v22：v20 只跑到「网页 PWA」层，Vercel 生产构建仍停在 cab86e2（那边英文照旧被抹掉）。
 //      本次清一次缓存，让设备重新拉取只删括号的新 JS。
 // v23：新增 MiniMax 语音识别支持 + 通话免提连续语音输入，清缓存让设备拉取新 JS。
-const CACHE_VERSION = "ai-phone-pwa-v23";
+// v24：修复免提录音听不到声音（AudioContext 被挂起 → 电平恒 0 → VAD 不触发），
+//      并修复自动搭话面板被拖出屏幕/高度溢出导致改不了参数。
+const CACHE_VERSION = "ai-phone-pwa-v24";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 

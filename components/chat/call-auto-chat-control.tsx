@@ -39,9 +39,13 @@ function readPos(): { x: number | null; y: number } {
         const raw = window.localStorage.getItem(POS_KEY);
         if (!raw) return { ...DEFAULT_POS };
         const parsed = JSON.parse(raw) as { x?: number | null; y?: number };
+        // 旧版本可能存下了贴边（甚至超出屏幕）的位置，读出来先夹回可视区域，
+        // 否则展开面板时会有一半在屏幕外面。
+        const maxX = Math.max(0, window.innerWidth - 150);
+        const maxY = Math.max(0, window.innerHeight - 120);
         return {
-            x: typeof parsed.x === "number" ? parsed.x : null,
-            y: typeof parsed.y === "number" ? parsed.y : DEFAULT_POS.y,
+            x: typeof parsed.x === "number" ? Math.min(Math.max(0, parsed.x), maxX) : null,
+            y: Math.min(Math.max(0, typeof parsed.y === "number" ? parsed.y : DEFAULT_POS.y), maxY),
         };
     } catch {
         return { ...DEFAULT_POS };
@@ -157,13 +161,18 @@ export function CallAutoChatControl({ config, onUpdate }: CallAutoChatControlPro
             style={{
                 position: "absolute",
                 zIndex: 30,
-                top: pos.y,
-                ...(pos.x == null ? { right: 12 } : { left: pos.x }),
+                // 面板展开时不再跟随按钮的拖拽位置：直接铺满可视区域（留 8px 边），
+                // 否则按钮被拖到屏幕边缘后，展开的面板会有一大半跑到屏幕外，改不了参数。
+                ...(showPanel
+                    ? { top: 8, left: 8, right: 8, bottom: 8 }
+                    : { top: pos.y, ...(pos.x == null ? { right: 12 } : { left: pos.x }) }),
                 display: "flex",
                 flexDirection: "column",
                 alignItems: "flex-end",
                 gap: 6,
                 touchAction: "none",
+                // 铺满时容器本身不拦事件，避免挡住底下的挂断/输入框
+                pointerEvents: showPanel ? "none" : "auto",
             }}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
@@ -185,6 +194,7 @@ export function CallAutoChatControl({ config, onUpdate }: CallAutoChatControlPro
                     color: config.enabled ? "#1b1b22" : "#fff",
                     fontSize: 12, fontWeight: 600, cursor: "pointer",
                     backdropFilter: "blur(8px)",
+                    pointerEvents: "auto",
                 }}
             >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
@@ -200,12 +210,31 @@ export function CallAutoChatControl({ config, onUpdate }: CallAutoChatControlPro
                     data-auto-chat-panel=""
                     style={{
                         display: "flex", flexDirection: "column", gap: 9,
-                        padding: "11px 12px", borderRadius: 14,
-                        background: "rgba(20,20,26,0.82)", backdropFilter: "blur(10px)",
-                        color: "#fff", fontSize: 12, minWidth: 196,
+                        padding: "12px 13px", borderRadius: 14,
+                        background: "rgba(20,20,26,0.94)", backdropFilter: "blur(10px)",
+                        color: "#fff", fontSize: 12,
+                        // 手机竖屏下铺满宽度、限高并可滚动：内容再多也改得到
+                        width: "100%", maxWidth: 440,
+                        flex: "1 1 auto", minHeight: 0, maxHeight: "100%",
+                        overflowY: "auto",
+                        WebkitOverflowScrolling: "touch", overscrollBehavior: "contain",
                         boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+                        pointerEvents: "auto",
                     }}
                 >
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                        <span style={{ fontWeight: 700, fontSize: 13 }}>自动搭话设置</span>
+                        <button
+                            type="button"
+                            aria-label="关闭设置"
+                            onClick={() => setShowPanel(false)}
+                            style={{
+                                width: 26, height: 26, borderRadius: 13, border: "none",
+                                background: "rgba(255,255,255,0.14)", color: "#fff",
+                                fontSize: 15, lineHeight: "26px", cursor: "pointer",
+                            }}
+                        >×</button>
+                    </div>
                     {/* 实时状态：手机上开不了控制台，问题都在这块看 */}
                     {status && (
                         <div

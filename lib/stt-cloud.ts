@@ -183,11 +183,26 @@ export type ContinuousVoiceSession = {
 };
 
 const DEFAULT_VAD = {
-    levelThreshold: 0.018,   // RMS 阈值，经验值
+    levelThreshold: 0.012,   // RMS 阈值下限（实际阈值还会按环境噪声自适应抬高）
     minSpeechMs: 350,        // 短于此视为误触丢弃
     silenceMs: 800,          // 停顿多久算一句说完
-    attackFrames: 4,         // 连续几帧超阈值才算开口（抗爆音）
+    attackFrames: 3,         // 连续几帧超阈值才算开口（抗爆音）
 };
+
+/** 申请麦克风：优先带回声消除/降噪；个别 WebView 不接受对象参数时退回 audio:true */
+async function openMic(): Promise<MediaStream> {
+    const want = {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+    };
+    try {
+        return await navigator.mediaDevices.getUserMedia({ audio: want });
+    } catch {
+        return await navigator.mediaDevices.getUserMedia({ audio: true })
+            .catch(() => { throw new Error("麦克风权限被拒绝或不可用"); });
+    }
+}
 
 export async function startContinuousVoice(
     callbacks: ContinuousVoiceCallbacks,
@@ -196,12 +211,22 @@ export async function startContinuousVoice(
     if (!isCallRecordingSupported()) throw new Error("当前环境不支持录音");
     const cfg = { ...DEFAULT_VAD, ...vad };
 
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => {
-        throw new Error("麦克风权限被拒绝或不可用");
-    });
+    const stream = await openMic();
 
     const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
     const audioCtx: AudioContext = new AudioCtx();
+    // 关键：安卓 WebView 里新建的 AudioContext 常是 suspended，AnalyserNode 会一直
+    // 返回静音波形（全 128）→ RMS 恒为 0 → VAD 永远不触发、一句话也录不到。
+    // 必须显式 resume，并在前几秒持续兜底（个别机型要等音频焦点释放才可恢复）。
+    const ensureRunning = () => {
+        if (audioCtx.state === "suspended") void audioCtx.resume().catch(() => {});
+    };
+    ensureRunning();
+    const resumeTimer = window.setInterval(ensureRunning, 400);
+    const stopResumeTimer = window.setTimeout(() => window.clearInterval(resumeTimer), 6000);
+    // 页面首次触摸也尝试恢复（部分 WebView 要求 resume 发生在用户手势里）
+    window.addEventListener("pointerdown", ensureRunning, true);
+
     const source = audioCtx.createMediaStreamSource(stream);
     const analyser = audioCtx.createAnalyser();
     analyser.fftSize = 1024;
@@ -222,8 +247,14 @@ export async function startContinuousVoice(
     let lastSpeechAt = 0;
     let attackCount = 0;
     let rafId = 0;
+    // 环境噪声底噪（自适应）：安静时缓慢跟随，阈值取「底噪 × 2.2」与下限的较大值，
+    // 避免不同机型麦克风增益差异导致要么一直误触发、要么永远听不到。
+    let noiseFloor = 0.004;
 
     const releaseMic = () => {
+        window.clearInterval(resumeTimer);
+        window.clearTimeout(stopResumeTimer);
+        window.removeEventListener("pointerdown", ensureRunning, true);
         try { stream.getTracks().forEach(t => t.stop()); } catch { /* ignore */ }
         try { audioCtx.close().catch(() => {}); } catch { /* ignore */ }
     };
@@ -231,10 +262,19 @@ export async function startContinuousVoice(
     const startRecorder = () => {
         chunks = [];
         const mime = pickMime();
-        recorder = mime
-            ? new MediaRecorder(stream, { mimeType: mime, audioBitsPerSecond: 32_000 })
-            : new MediaRecorder(stream);
+        try {
+            recorder = mime
+                ? new MediaRecorder(stream, { mimeType: mime, audioBitsPerSecond: 32_000 })
+                : new MediaRecorder(stream);
+        } catch {
+            recorder = new MediaRecorder(stream);
+        }
         recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+        recorder.onerror = () => {
+            recorder = null;
+            chunks = [];
+            callbacks.onError("录音失败，请重试");
+        };
         recorder.start();
         recStartTs = performance.now();
     };
@@ -277,7 +317,12 @@ export async function startContinuousVoice(
         }
 
         const now = performance.now();
-        const isLoud = rms >= cfg.levelThreshold;
+        // 自适应阈值：安静时底噪缓慢跟随（只在 idle 且明显低于阈值时更新）
+        if (state === "idle" && rms < cfg.levelThreshold) {
+            noiseFloor = noiseFloor * 0.98 + rms * 0.02;
+        }
+        const threshold = Math.max(cfg.levelThreshold, noiseFloor * 2.2);
+        const isLoud = rms >= threshold;
 
         if (state === "idle") {
             if (isLoud) {
@@ -319,17 +364,21 @@ export async function startContinuousVoice(
 /** 调云端语音识别把录音转文字。OpenAI 走 /audio/transcriptions，MiniMax 走 /speech_to_text。 */
 export async function transcribeAudioBlob(blob: Blob, config: CloudSttConfig): Promise<string> {
     const type = (blob.type || "").toLowerCase();
-    const ext = type.includes("mp4") ? "mp4"
+    const isMinimax = config.provider === "Minimax";
+    // MiniMax 认 wav/aiff/flac/m4a(mp4 容器)/mp3/aac/opus/ogg，不认 webm 容器；
+    // MediaRecorder 产出的 audio/mp4 就是 m4a，扩展名按 m4a 传更稳。
+    const ext = type.includes("mp4") ? (isMinimax ? "m4a" : "mp4")
         : type.includes("ogg") ? "ogg"
         : type.includes("wav") ? "wav"
         : type.includes("mp3") ? "mp3"
         : "webm";
     const form = new FormData();
     form.set("model", config.model);
+    if (isMinimax) form.set("response_format", "json");
     form.set("file", blob, `speech.${ext}`);
 
     // MiniMax 用 /speech_to_text，OpenAI 兼容用 /audio/transcriptions
-    const endpoint = config.provider === "Minimax"
+    const endpoint = isMinimax
         ? `${config.baseUrl}/speech_to_text`
         : `${config.baseUrl}/audio/transcriptions`;
 

@@ -155,9 +155,12 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             const raw = window.localStorage.getItem(AUTO_CHAT_POS_KEY);
             if (!raw) return { ...AUTO_CHAT_DEFAULT_POS };
             const parsed = JSON.parse(raw) as { x?: number | null; y?: number };
+            // 旧版本可能存下了超出屏幕的位置，读出来先夹回可视区域
+            const maxX = Math.max(0, window.innerWidth - 150);
+            const maxY = Math.max(0, window.innerHeight - 120);
             return {
-                x: typeof parsed.x === "number" ? parsed.x : null,
-                y: typeof parsed.y === "number" ? parsed.y : AUTO_CHAT_DEFAULT_POS.y,
+                x: typeof parsed.x === "number" ? Math.min(Math.max(0, parsed.x), maxX) : null,
+                y: Math.min(Math.max(0, typeof parsed.y === "number" ? parsed.y : AUTO_CHAT_DEFAULT_POS.y), maxY),
             };
         } catch {
             return { ...AUTO_CHAT_DEFAULT_POS };
@@ -788,7 +791,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
         } else {
             continuousVoice.stop();
         }
-    }, [holdToTalk, callState, inputMode, isMuted, minimized, continuousVoice]);
+    }, [holdToTalk, callState, inputMode, isMuted, minimized, continuousVoice.start, continuousVoice.stop, continuousVoice.setMuted]);
 
     const handleInputModeToggle = useCallback(() => {
         if (androidTextInputOnly) {
@@ -814,7 +817,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
         } else {
             setInputMode("voice");
         }
-    }, [androidTextInputOnly, inputMode, continuousVoice]);
+    }, [androidTextInputOnly, inputMode, continuousVoice.stop]);
 
     const handleTextSubmit = useCallback(() => {
         const text = typedText.trim();
@@ -1150,8 +1153,17 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                     ref={autoChatBoxRef}
                     style={{
                         ...AUTO_CHAT_BOX_BASE,
-                        top: autoChatPos.y,
-                        ...(autoChatPos.x == null ? { right: 12 } : { left: autoChatPos.x }),
+                        // 面板展开时铺满可视区域（留 8px 边），不跟随按钮拖拽位置：
+                        // 按钮被拖到边缘后展开的面板会跑出屏幕，参数就改不了了。
+                        ...(showAutoChatPanel
+                            ? {
+                                top: 8, left: 8, right: 8, bottom: 8,
+                                pointerEvents: "none" as const,
+                            }
+                            : {
+                                top: autoChatPos.y,
+                                ...(autoChatPos.x == null ? { right: 12 } : { left: autoChatPos.x }),
+                            }),
                     }}
                     onPointerDown={handleAutoChatPointerDown}
                     onPointerMove={handleAutoChatPointerMove}
@@ -1173,6 +1185,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                             color: autoChatConfig.enabled ? "#1b1b22" : "#fff",
                             fontSize: 12, fontWeight: 600, cursor: "pointer",
                             backdropFilter: "blur(8px)",
+                            pointerEvents: "auto",
                         }}
                     >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
@@ -1188,12 +1201,30 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                             data-auto-chat-panel=""
                             style={{
                                 display: "flex", flexDirection: "column", gap: 9,
-                                padding: "11px 12px", borderRadius: 14,
-                                background: "rgba(20,20,26,0.82)", backdropFilter: "blur(10px)",
-                                color: "#fff", fontSize: 12, minWidth: 196,
+                                padding: "12px 13px", borderRadius: 14,
+                                background: "rgba(20,20,26,0.94)", backdropFilter: "blur(10px)",
+                                color: "#fff", fontSize: 12,
+                                width: "100%", maxWidth: 440,
+                                flex: "1 1 auto", minHeight: 0, maxHeight: "100%",
+                                overflowY: "auto",
+                                WebkitOverflowScrolling: "touch", overscrollBehavior: "contain",
                                 boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+                                pointerEvents: "auto",
                             }}
                         >
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                                <span style={{ fontWeight: 700, fontSize: 13 }}>自动搭话设置</span>
+                                <button
+                                    type="button"
+                                    aria-label="关闭设置"
+                                    onClick={() => setShowAutoChatPanel(false)}
+                                    style={{
+                                        width: 26, height: 26, borderRadius: 13, border: "none",
+                                        background: "rgba(255,255,255,0.14)", color: "#fff",
+                                        fontSize: 15, lineHeight: "26px", cursor: "pointer",
+                                    }}
+                                >×</button>
+                            </div>
                             <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
                                 <span style={{ fontWeight: 600 }}>自动搭话</span>
                                 <input
@@ -1439,9 +1470,29 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                 {/* 免提提示行：连续监听模式下告诉用户可以直接说话 */}
                 {holdToTalk && inputMode === "voice" && callState !== "CONNECTING" && callState !== "ENDED" && (
                     <div className="text-center ts-12 opacity-80 px-5">
-                        {continuousVoice.state === "transcribing" ? "识别中…"
-                            : continuousVoice.state === "speaking" ? "正在聆听…"
-                            : continuousVoice.error || "直接说话即可，无需按住"}
+                        <div>
+                            {continuousVoice.state === "transcribing" ? "识别中…"
+                                : continuousVoice.state === "speaking" ? "正在聆听…"
+                                : continuousVoice.error || "直接说话即可，无需按住"}
+                        </div>
+                        {/* 收音电平：手机上没法看控制台，这几格能直接看出麦克风有没有在收音 */}
+                        {!continuousVoice.error && (
+                            <div className="flex items-center justify-center gap-[3px] mt-1" aria-hidden="true">
+                                {[0.02, 0.05, 0.09, 0.16, 0.28].map((threshold, index) => (
+                                    <span
+                                        key={threshold}
+                                        style={{
+                                            width: 4,
+                                            height: 6 + index * 3,
+                                            borderRadius: 2,
+                                            background: continuousVoice.level >= threshold
+                                                ? "currentColor"
+                                                : "rgba(255,255,255,0.2)",
+                                        }}
+                                    />
+                                ))}
+                            </div>
+                        )}
                     </div>
                 )}
 

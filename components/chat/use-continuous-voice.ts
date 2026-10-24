@@ -16,7 +16,7 @@
 //     不录音不切段。muted 同时存 ref，会话启动时把最近一次的静音态灌进去。
 //   - 卸载兜底：useEffect 清理里 session.stop() 释放麦克风 + AudioContext。
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     resolveCloudSttConfig,
     startContinuousVoice,
@@ -61,6 +61,11 @@ export function useContinuousVoice(options: UseContinuousVoiceOptions): UseConti
     const startingRef = useRef(false);
     const mountedRef = useRef(true);
     const mutedRef = useRef(false);
+    // 失败后短暂冷却：调用方（三个通话屏的 useEffect）会随通话状态频繁重跑，
+    // 若每次都立刻重新 getUserMedia，安卓壳的权限桥接会因「已有请求在途」直接拒绝，
+    // 表现就是明明授权了却报「麦克风权限被拒绝」。
+    const failCooldownRef = useRef(0);
+    const levelAtRef = useRef(0);
     const optionsRef = useRef(options);
     optionsRef.current = options;
 
@@ -81,6 +86,7 @@ export function useContinuousVoice(options: UseContinuousVoiceOptions): UseConti
 
     const start = useCallback(async () => {
         if (sessionRef.current || startingRef.current) return;
+        if (Date.now() < failCooldownRef.current) return;
         startingRef.current = true;
         setError("");
         try {
@@ -118,7 +124,13 @@ export function useContinuousVoice(options: UseContinuousVoiceOptions): UseConti
                     fail(message);
                 },
                 onLevel: (lvl) => {
-                    if (mountedRef.current) setLevel(lvl);
+                    if (!mountedRef.current) return;
+                    // 波形 60fps 更新会让整个通话界面每秒重渲染 60 次（视频通话尤其卡），
+                    // 降到 ~12fps 足够看出「有没有在收音」。
+                    const now = performance.now();
+                    if (now - levelAtRef.current < 80) return;
+                    levelAtRef.current = now;
+                    setLevel(lvl);
                 },
             });
             startingRef.current = false;
@@ -129,6 +141,7 @@ export function useContinuousVoice(options: UseContinuousVoiceOptions): UseConti
             setState("listening");
         } catch (e) {
             startingRef.current = false;
+            failCooldownRef.current = Date.now() + 1500;
             fail(e instanceof Error ? e.message : String(e));
             setState("idle");
         }
@@ -150,5 +163,10 @@ export function useContinuousVoice(options: UseContinuousVoiceOptions): UseConti
         sessionRef.current?.setMuted(muted);
     }, []);
 
-    return { state, level, error, start, stop, setMuted };
+    // 返回稳定的对象：三个通话屏都在 useEffect 依赖数组里放了 continuousVoice，
+    // 每次渲染换新对象会让 effect 每秒重跑几十次（反复 start/stop 麦克风）。
+    return useMemo(
+        () => ({ state, level, error, start, stop, setMuted }),
+        [state, level, error, start, stop, setMuted],
+    );
 }
