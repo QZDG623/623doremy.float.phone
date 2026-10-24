@@ -68,7 +68,32 @@ export function resolveCloudSttConfig(characterId?: string): CloudSttConfig | nu
     return null;
 }
 
+/**
+ * 壳注入的原生麦克风桥（window.FloatMic，见 android-shell/MicBridge.kt）。
+ *
+ * 为什么需要它：WebView 的 getUserMedia 在部分安卓机上直接
+ * `NotReadableError: Could not start audio source`——系统权限与壳的权限桥接都没问题，
+ * 是 Chromium 的音频设备模块打不开输入源，重试也没用。原生 AudioRecord 绕开整层，
+ * 直接在壳里采集并把切好的 WAV 交回来。
+ */
+type NativeMicBridge = {
+    /** 成功返回空串，失败返回错误原因 */
+    start: () => string;
+    stop: () => void;
+    setMuted: (m: boolean) => void;
+    level: () => number;
+    isSpeaking: () => boolean;
+    running: () => boolean;
+    lastError: () => string;
+    takeSegment: () => string;
+};
+
+export function nativeMicAvailable(): boolean {
+    return typeof window !== "undefined" && !!(window as unknown as { FloatMic?: NativeMicBridge }).FloatMic;
+}
+
 export function isCallRecordingSupported(): boolean {
+    if (nativeMicAvailable()) return true;
     return typeof navigator !== "undefined"
         && !!navigator.mediaDevices?.getUserMedia
         && typeof MediaRecorder !== "undefined";
@@ -219,10 +244,66 @@ async function openMic(): Promise<MediaStream> {
     throw new Error(`麦克风打开失败（${name}${detail ? `: ${detail}` : ""}）`);
 }
 
+/** base64 → Blob（原生交回来的 WAV 段） */
+function base64ToBlob(b64: string, type: string): Blob {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], { type });
+}
+
+/**
+ * 走原生 AudioRecord 的连续监听。VAD 与切句都在 Kotlin 里做
+ * （见 MicBridge.kt），网页只轮询电平、取走 WAV 段。
+ */
+function startNativeContinuousVoice(callbacks: ContinuousVoiceCallbacks): ContinuousVoiceSession {
+    const mic = (window as unknown as { FloatMic: NativeMicBridge }).FloatMic;
+    const err = mic.start();
+    if (err) throw new Error(`麦克风打开失败（${err}）`);
+
+    let stopped = false;
+    let wasSpeaking = false;
+    let lastLevelAt = 0;
+
+    // 电平轮询 ~12fps：够做动效，又不会把渲染线程压满
+    const levelTimer = window.setInterval(() => {
+        if (stopped) return;
+        const now = performance.now();
+        if (now - lastLevelAt < 80) return;
+        lastLevelAt = now;
+        // 原生给的是原始 RMS（说话约 0.03~0.25），放大到 0~1 便于 UI 显示
+        callbacks.onLevel?.(Math.min(1, Number(mic.level() || 0) * 4));
+        const speaking = !!mic.isSpeaking();
+        if (speaking && !wasSpeaking) callbacks.onSpeechStart?.();
+        wasSpeaking = speaking;
+    }, 80);
+
+    // 取段轮询：原生切完一句就排队，这里取走送识别
+    const segmentTimer = window.setInterval(() => {
+        if (stopped) return;
+        const b64 = mic.takeSegment();
+        if (b64) callbacks.onSegment(base64ToBlob(b64, "audio/wav"));
+    }, 120);
+
+    return {
+        stop: () => {
+            if (stopped) return;
+            stopped = true;
+            window.clearInterval(levelTimer);
+            window.clearInterval(segmentTimer);
+            mic.setMuted(true);
+            mic.stop();
+        },
+        setMuted: (m: boolean) => { if (!stopped) mic.setMuted(m); },
+    };
+}
+
 export async function startContinuousVoice(
     callbacks: ContinuousVoiceCallbacks,
     vad: Partial<typeof DEFAULT_VAD> = {},
 ): Promise<ContinuousVoiceSession> {
+    // 壳里就用原生录音：WebView 的音频采集在部分机型上直接起不来。
+    if (nativeMicAvailable()) return startNativeContinuousVoice(callbacks);
     if (!isCallRecordingSupported()) throw new Error("当前环境不支持录音");
     const cfg = { ...DEFAULT_VAD, ...vad };
 
@@ -412,8 +493,19 @@ export async function transcribeAudioBlob(blob: Blob, config: CloudSttConfig): P
         }
         const contentType = (res.headers.get("content-type") || "").toLowerCase();
         if (contentType.includes("json")) {
-            const data = await res.json() as { text?: unknown };
-            return typeof data.text === "string" ? data.text.trim() : "";
+            const data = await res.json() as Record<string, unknown>;
+            // 不同中转/版本的 JSON 结构不一样：MiniMax 可能把结果放在 data/result 里，
+            // 也可能平铺在顶层。三种都试一遍，别因为层级差异就当成「没识别到」。
+            const fromText = (node: unknown): string => {
+                if (!node || typeof node !== "object") return "";
+                const value = (node as { text?: unknown }).text;
+                return typeof value === "string" ? value.trim() : "";
+            };
+            const text = fromText(data)
+                || fromText(data.data)
+                || fromText(data.result)
+                || "";
+            return text;
         }
         // response_format=text 风格的中转直接回纯文本
         return (await res.text()).trim();

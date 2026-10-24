@@ -308,6 +308,9 @@ class MainActivity : AppCompatActivity() {
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, false)
 
         webView.addJavascriptInterface(ShellBridge(), "AndroidShell")
+        // 原生麦克风桥：WebView 的 getUserMedia 在部分机型上直接 NotReadableError
+        // （设备打不开输入源），通话免提语音改走原生 AudioRecord。
+        webView.addJavascriptInterface(MicBridge.attach(this), "FloatMic")
         // 桌面小组件桥：独立命名空间，跟通话/截屏那套分开，
         // 免得以後加方法时和 AndroidShell 里几十个方法混在一起。
         webView.addJavascriptInterface(PhoneWidgetBridge(), "PhoneWidget")
@@ -610,6 +613,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         if (ShellBus.webView === webView) ShellBus.webView = null
+        // 原生麦克风：Activity 没了就别再占着录音设备
+        MicBridge.detach()
         CookieManager.getInstance().flush()
         webView.destroy()
         super.onDestroy()

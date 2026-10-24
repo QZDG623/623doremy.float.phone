@@ -6,6 +6,9 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
+import android.Manifest
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -28,6 +31,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -438,7 +442,28 @@ class CallOverlayService : Service() {
         super.onCreate()
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         createChannel()
-        startForeground(NOTIF_ID, buildNotification())
+        startForegroundCompat()
+    }
+
+    /**
+     * 前台服务要带 microphone 类型，切后台后原生录音才不会被系统静音。
+     * 但 Android 14 起，声明 microphone 类型却没拿到录音权限会让 startForeground
+     * 直接抛 SecurityException —— 那样连浮窗都建不出来。所以按权限与 API 级别
+     * 逐级降级，任何一步失败都退回最朴素的两参调用。
+     */
+    private fun startForegroundCompat() {
+        if (Build.VERSION.SDK_INT >= 29) {
+            val canMic = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
+            // 用 manifest 里声明过的类型位组合，避免「未声明的类型」再抛一次
+            var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            if (canMic) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            val ok = runCatching {
+                startForeground(NOTIF_ID, buildNotification(), types)
+            }.isSuccess
+            if (ok) return
+        }
+        runCatching { startForeground(NOTIF_ID, buildNotification()) }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
