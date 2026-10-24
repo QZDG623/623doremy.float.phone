@@ -19,7 +19,7 @@
 // v20：收回「中文台词里的英文一律抹掉」，只删括号内容；台词正文里的英文照常念。
 // v21：v20 只跑到「网页 PWA」层，Vercel 生产构建仍停在 cab86e2（那边英文照旧被抹掉）。
 //      本次清一次缓存，让设备重新拉取只删括号的新 JS。
-const CACHE_VERSION = "ai-phone-pwa-v21";
+const CACHE_VERSION = "ai-phone-pwa-v22";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 

@@ -12,7 +12,7 @@ import { suspendBailoutsForCall } from "@/lib/push-bailout-client";
 import { createSTTSession, type STTSession } from "@/lib/stt-service";
 import { resolveVoiceConfig, synthesizeSpeech, playAudioBlob, playAudioBlobViaMediaElement, setCallAudioSessionActive } from "@/lib/tts-service";
 import { isCallRecordingSupported, resolveCloudSttConfig } from "@/lib/stt-cloud";
-import { useHoldToTalk } from "./use-hold-to-talk";
+import { useContinuousVoice } from "./use-continuous-voice";
 import { suspendKeepAliveForCall, resumeKeepAliveAfterCall } from "@/lib/use-weixin-bridge";
 import { BilingualTextBlock } from "./message-bubble";
 import { splitBilingualText } from "@/lib/bilingual-text";
@@ -73,7 +73,7 @@ type GroupCallScreenProps = {
 
 export function GroupCallScreen({ type, session, characters, onEnd, initiator = "user", initiatorName, minimized = false, onMinimize, onRestore }: GroupCallScreenProps) {
     // 同 voice-call-screen：iOS 保留 Web Speech 免提 + Web Audio 播放；
-    // 其余设备改按住说话 + 云端转写，播放走媒体元素。没配识别时回落旧行为。
+    // 其余设备改免提连续监听 + 云端转写，播放走媒体元素。没配识别时回落旧行为。
     const iosDeviceRef = useRef(isIOSDevice());
     const iosDevice = iosDeviceRef.current;
     const holdToTalkRef = useRef(
@@ -231,9 +231,9 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
     const stateLabel = (): string => {
         switch (callState) {
             case "CONNECTING": return initiator === "character" ? "来电..." : "正在呼叫...";
-            case "IDLE": return isMuted && !holdToTalk ? "已静音" : (holdToTalk && inputMode === "voice" ? "按住麦克风说话" : "通话中");
-            case "USER_SPEAKING": return holdToTalk ? "松开发送" : "正在聆听...";
-            case "PROCESSING": return holdToTalk && holdInput.recState === "transcribing" ? "识别中..." : "对方正在思考...";
+            case "IDLE": return isMuted ? "已静音" : "通话中";
+            case "USER_SPEAKING": return "正在聆听...";
+            case "PROCESSING": return continuousVoice.state === "transcribing" ? "识别中..." : "对方正在思考...";
             case "AI_SPEAKING": return "对方正在说话...";
             case "ENDED": return "通话已结束";
         }
@@ -358,7 +358,7 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
 
     // ── Auto-listen ──────────────────────────────────
     const startListening = useCallback(() => {
-        if (holdToTalk) return; // 按住说话模式不用 Web Speech 自动监听
+        if (holdToTalk) return; // 免提连续监听模式不用 Web Speech 自动监听
         if (androidTextInputOnly) {
             setInputMode("text");
             return;
@@ -405,7 +405,7 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
     }, [androidTextInputOnly, holdToTalk, runConversationTurn, characters]);
 
     useEffect(() => {
-        if (holdToTalk) return; // 按住说话模式无自动监听
+        if (holdToTalk) return; // 免提连续监听模式有自己的启停 effect
         if (inputMode === "text" && sttRef.current) {
             sttRef.current.abort();
             sttRef.current = null;
@@ -420,37 +420,11 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
         if (isMuted && sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
     }, [androidTextInputOnly, holdToTalk, callState, isMuted, inputMode, startListening]);
 
-    const handleInputModeToggle = useCallback(() => {
-        if (androidTextInputOnly) {
-            if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
-            setInterimText("");
-            if (stateRef.current === "USER_SPEAKING") setCallState("IDLE");
-            setInputMode("text");
-            return;
-        }
-        if (inputMode === "voice") {
-            if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
-            setInterimText("");
-            if (stateRef.current === "USER_SPEAKING") setCallState("IDLE");
-            setInputMode("text");
-        } else {
-            setInputMode("voice");
-        }
-    }, [androidTextInputOnly, inputMode]);
-
-    const handleTextSubmit = useCallback(() => {
-        const text = typedText.trim();
-        if (!text || callState !== "IDLE") return;
-        if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
-        setTypedText("");
-        runConversationTurn(text);
-    }, [typedText, callState, runConversationTurn]);
-
-    // 按住说话（非 iOS）：按下录音，松开转写后走对话轮。群聊无单角色绑定，
+    // 免提连续监听（非 iOS）：进了语音模式就一直听，开口自动录、停顿自动切段、
+    // 每段转写后直接发出去，用户不用按任何按钮，像真·电话一样。群聊无单角色绑定，
     // 识别配置取第一个可用的 OpenAI 兼容语音配置。
-    const holdInput = useHoldToTalk({
-        canStart: () => stateRef.current === "IDLE",
-        onRecordingStart: () => {
+    const continuousVoice = useContinuousVoice({
+        onSpeechStart: () => {
             setInterimText("");
             if (stateRef.current === "IDLE") setCallState("USER_SPEAKING");
         },
@@ -466,12 +440,62 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
         },
     });
 
+    // 连续监听的启停：语音模式 + IDLE/USER_SPEAKING + 未静音 → 启动；
+    // 其余（文字模式 / PROCESSING / AI_SPEAKING / 静音 / 结束）→ 停止。
+    // PROCESSING 与 AI_SPEAKING 期间必须停，否则会把角色 TTS 的声音录进去。
+    useEffect(() => {
+        if (!holdToTalk) return;
+        if (callState === "CONNECTING" || callState === "ENDED") {
+            continuousVoice.stop();
+            return;
+        }
+        if (inputMode !== "voice") {
+            continuousVoice.stop();
+            return;
+        }
+        if (callState === "IDLE" || callState === "USER_SPEAKING") {
+            continuousVoice.setMuted(isMuted);
+            continuousVoice.start();
+        } else {
+            continuousVoice.stop();
+        }
+    }, [holdToTalk, callState, inputMode, isMuted, continuousVoice]);
+
+    const handleInputModeToggle = useCallback(() => {
+        if (androidTextInputOnly) {
+            if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
+            continuousVoice.stop();
+            setInterimText("");
+            if (stateRef.current === "USER_SPEAKING") setCallState("IDLE");
+            setInputMode("text");
+            return;
+        }
+        if (inputMode === "voice") {
+            if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
+            continuousVoice.stop();
+            setInterimText("");
+            if (stateRef.current === "USER_SPEAKING") setCallState("IDLE");
+            setInputMode("text");
+        } else {
+            setInputMode("voice");
+        }
+    }, [androidTextInputOnly, inputMode, continuousVoice]);
+
+    const handleTextSubmit = useCallback(() => {
+        const text = typedText.trim();
+        if (!text || callState !== "IDLE") return;
+        if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
+        setTypedText("");
+        runConversationTurn(text);
+    }, [typedText, callState, runConversationTurn]);
+
     // ── Hangup ──────────────────────────────────────
     const handleHangup = useCallback(() => {
         // 挂断时收掉安卓壳的原生浮窗
         stopShellCallOverlay();
         setCallState("ENDED");
         if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
+        continuousVoice.stop();
         if (audioAbortRef.current) { audioAbortRef.current(); audioAbortRef.current = null; }
         if (window.speechSynthesis) window.speechSynthesis.cancel();
 
@@ -504,6 +528,7 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
                 sttRef.current.abort();
                 sttRef.current = null;
             }
+            continuousVoice.stop();
             setInterimText("");
         },
     });
@@ -519,6 +544,7 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
         return () => {
             stateRef.current = "ENDED";
             if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
+            continuousVoice.stop();
             if (audioAbortRef.current) { audioAbortRef.current(); audioAbortRef.current = null; }
             setCallAudioSessionActive(false);
         };
@@ -583,60 +609,6 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
 
     const renderControls = () => {
         if (callState !== "ENDED" && callState !== "CONNECTING") {
-            if (holdToTalk) {
-                return (
-                    <>
-                        {/* 输入方式切换（按住说话模式不需要持续开麦，静音位改放 Aa 切换） */}
-                        <button
-                            onClick={handleInputModeToggle}
-                            className={`ui-call-btn ${isVideo ? "ui-call-btn-sm" : ""} ui-call-btn-muted`}
-                            aria-label={inputMode === "voice" ? "切换到文字输入" : "切换到语音输入"}
-                        >
-                            {inputMode === "voice" ? (
-                                <span className="ui-call-input-text-icon">Aa</span>
-                            ) : (
-                                <svg width={isVideo ? 22 : 24} height={isVideo ? 22 : 24} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
-                                    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-                                    <line x1="12" y1="19" x2="12" y2="22" />
-                                </svg>
-                            )}
-                        </button>
-
-                        {/* 按住说话主按钮（文字模式下点按切回语音） */}
-                        <button
-                            className={`ui-call-mic ${isVideo ? "" : "ui-call-mic-lg"}`}
-                            style={{ touchAction: "none" }}
-                            data-state={
-                                inputMode === "text" ? "text"
-                                    : holdInput.recState === "recording" ? "speaking"
-                                    : callState === "IDLE" ? "idle"
-                                    : "busy"
-                            }
-                            aria-label={inputMode === "text" ? "切换到语音输入" : "按住说话"}
-                            title={inputMode === "text" ? "切换到语音输入" : "按住说话"}
-                            {...(inputMode === "voice" ? holdInput.pressHandlers : { onClick: handleInputModeToggle })}
-                        >
-                            {inputMode === "text" ? (
-                                <span className="ui-call-input-text-icon">Aa</span>
-                            ) : (
-                                <svg width={isVideo ? 28 : 32} height={isVideo ? 28 : 32} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
-                                    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-                                    <line x1="12" y1="19" x2="12" y2="22" />
-                                </svg>
-                            )}
-                        </button>
-
-                        <button onClick={handleHangup} className={`ui-call-btn ${isVideo ? "ui-call-btn-sm" : ""} ui-call-btn-danger`} aria-label="挂断">
-                            <svg width={isVideo ? 22 : 24} height={isVideo ? 22 : 24} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91" />
-                                <line x1="23" y1="1" x2="1" y2="23" />
-                            </svg>
-                        </button>
-                    </>
-                );
-            }
             if (androidTextInputOnly) {
                 return (
                     <button onClick={handleHangup} className={`ui-call-btn ${isVideo ? "ui-call-btn-sm" : ""} ui-call-btn-danger`} aria-label="挂断">
@@ -651,7 +623,11 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
             return (
                 <>
                     <button
-                        onClick={() => setIsMuted(!isMuted)}
+                        onClick={() => {
+                            const next = !isMuted;
+                            setIsMuted(next);
+                            if (holdToTalk) continuousVoice.setMuted(next);
+                        }}
                         className={`ui-call-btn ${isVideo ? "ui-call-btn-sm" : ""} ui-call-btn-muted`}
                         {...(isMuted ? { "data-checked": "" } : {})}
                     >
@@ -680,8 +656,8 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
                                 : callState === "IDLE" ? (isMuted ? "idle-muted" : "idle")
                                 : "busy"
                         }
-                        aria-label={androidTextInputOnly ? "文字输入" : inputMode === "voice" ? "切换到文字输入" : "切换到语音输入"}
-                        title={androidTextInputOnly ? "安卓浏览器使用文字输入" : inputMode === "voice" ? "切换到文字输入" : "切换到语音输入"}
+                        aria-label={inputMode === "voice" ? "切换到文字输入" : "切换到语音输入"}
+                        title={inputMode === "voice" ? "切换到文字输入" : "切换到语音输入"}
                     >
                         {inputMode === "text" ? (
                             <span className="ui-call-input-text-icon">Aa</span>

@@ -132,6 +132,172 @@ export async function startCallRecording(): Promise<ActiveCallRecording> {
     };
 }
 
+// ── 连续监听（免提通话）────────────────────────────────
+//
+// 非 iOS 的通话里，原先只有「按住说话」——按一下录一段、松手才识别。用户要的是
+// 真·电话那种：进了语音模式就一直听，说完一句自动识别发出去。这里实现一个
+// 基于音量（RMS）的语音活动检测（VAD）：
+//   - 麦克风常开，AnalyserNode 实时算 RMS；
+//   - 音量超过阈值 → 判定为开始说话，启动 MediaRecorder 录这一段；
+//   - 音量掉到阈值以下并持续 silenceMs → 判定一句话说完，停录、把这段音频
+//     回调出去给上层转写；
+//   - 回到「待命」，继续等下一句。
+//
+// 这样一句一句地切，每段几秒到十几秒，转写接口压力小、延迟也低。静音期间不
+// 录音，麦克风虽然开着但不产生数据。
+
+export type ContinuousVoiceCallbacks = {
+    /** 检测到开口（音量越过阈值） */
+    onSpeechStart?: () => void;
+    /** 一句话说完，回调这段音频 */
+    onSegment: (blob: Blob) => void;
+    /** 出错（麦克风权限、录音失败等） */
+    onError: (message: string) => void;
+    /** 实时音量 0~1，UI 可用来做波形/动效 */
+    onLevel?: (level: number) => void;
+};
+
+export type ContinuousVoiceSession = {
+    /** 彻底停止，释放麦克风 */
+    stop: () => void;
+    /** 静音/取消静音：静音时不录音也不切段，但麦克风保持打开 */
+    setMuted: (muted: boolean) => void;
+};
+
+const DEFAULT_VAD = {
+    levelThreshold: 0.018,   // RMS 阈值，经验值
+    minSpeechMs: 350,        // 短于此视为误触丢弃
+    silenceMs: 800,          // 停顿多久算一句说完
+    attackFrames: 4,         // 连续几帧超阈值才算开口（抗爆音）
+};
+
+export async function startContinuousVoice(
+    callbacks: ContinuousVoiceCallbacks,
+    vad: Partial<typeof DEFAULT_VAD> = {},
+): Promise<ContinuousVoiceSession> {
+    if (!isCallRecordingSupported()) throw new Error("当前环境不支持录音");
+    const cfg = { ...DEFAULT_VAD, ...vad };
+
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => {
+        throw new Error("麦克风权限被拒绝或不可用");
+    });
+
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    const audioCtx: AudioContext = new AudioCtx();
+    const source = audioCtx.createMediaStreamSource(stream);
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.4;
+    source.connect(analyser);
+    const timeData = new Uint8Array(analyser.fftSize);
+
+    const pickMime = () =>
+        ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]
+            .find(m => { try { return MediaRecorder.isTypeSupported(m); } catch { return false; } });
+
+    let recorder: MediaRecorder | null = null;
+    let chunks: Blob[] = [];
+    let recStartTs = 0;
+    let muted = false;
+    let stopped = false;
+    let state: "idle" | "speaking" = "idle";
+    let lastSpeechAt = 0;
+    let attackCount = 0;
+    let rafId = 0;
+
+    const releaseMic = () => {
+        try { stream.getTracks().forEach(t => t.stop()); } catch { /* ignore */ }
+        try { audioCtx.close().catch(() => {}); } catch { /* ignore */ }
+    };
+
+    const startRecorder = () => {
+        chunks = [];
+        const mime = pickMime();
+        recorder = mime
+            ? new MediaRecorder(stream, { mimeType: mime, audioBitsPerSecond: 32_000 })
+            : new MediaRecorder(stream);
+        recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+        recorder.start();
+        recStartTs = performance.now();
+    };
+
+    const flushSegment = () => {
+        const r = recorder;
+        recorder = null;
+        if (!r) return;
+        const onstop = () => {
+            const blob = new Blob(chunks, { type: r.mimeType || "audio/webm" });
+            chunks = [];
+            const dur = performance.now() - recStartTs;
+            if (blob.size > 0 && dur >= cfg.minSpeechMs) {
+                callbacks.onSegment(blob);
+            }
+        };
+        try {
+            r.onstop = onstop;
+            r.stop();
+        } catch {
+            onstop();
+        }
+    };
+
+    const loop = () => {
+        if (stopped) return;
+        rafId = requestAnimationFrame(loop);
+        analyser.getByteTimeDomainData(timeData);
+        let sum = 0;
+        for (let i = 0; i < timeData.length; i++) {
+            const v = (timeData[i] - 128) / 128;
+            sum += v * v;
+        }
+        const rms = Math.sqrt(sum / timeData.length);
+        callbacks.onLevel?.(rms);
+
+        if (muted) {
+            if (state === "speaking") { state = "idle"; flushSegment(); }
+            return;
+        }
+
+        const now = performance.now();
+        const isLoud = rms >= cfg.levelThreshold;
+
+        if (state === "idle") {
+            if (isLoud) {
+                attackCount += 1;
+                if (attackCount >= cfg.attackFrames) {
+                    attackCount = 0;
+                    state = "speaking";
+                    lastSpeechAt = now;
+                    callbacks.onSpeechStart?.();
+                    startRecorder();
+                }
+            } else {
+                attackCount = 0;
+            }
+        } else {
+            if (isLoud) {
+                lastSpeechAt = now;
+            } else if (now - lastSpeechAt >= cfg.silenceMs) {
+                state = "idle";
+                flushSegment();
+            }
+        }
+    };
+
+    loop();
+
+    return {
+        stop: () => {
+            if (stopped) return;
+            stopped = true;
+            cancelAnimationFrame(rafId);
+            if (state === "speaking") flushSegment();
+            releaseMic();
+        },
+        setMuted: (m: boolean) => { muted = m; },
+    };
+}
+
 /** 调 OpenAI 兼容 /audio/transcriptions 把录音转文字。 */
 export async function transcribeAudioBlob(blob: Blob, config: CloudSttConfig): Promise<string> {
     const type = (blob.type || "").toLowerCase();
