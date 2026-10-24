@@ -10,30 +10,47 @@ import { loadBindingConfig, loadVoiceConfigs, resolveBinding } from "./settings-
 import type { VoiceApiConfig } from "./settings-types";
 
 export type CloudSttConfig = {
+    provider: "OpenAI" | "Minimax";
     baseUrl: string;
     apiKey: string;
     model: string;
 };
 
 const DEFAULT_STT_MODEL = "whisper-1";
+const DEFAULT_MINIMAX_STT_MODEL = "asr-1.0";
 const TRANSCRIBE_TIMEOUT_MS = 60_000;
 // 录音兜底上限：忘记松手/指针事件丢失时自动停，避免无限占用麦克风
 const MAX_RECORDING_MS = 60_000;
 
 function toCloudSttConfig(config: VoiceApiConfig | undefined | null): CloudSttConfig | null {
-    if (!config || config.provider !== "OpenAI") return null;
+    if (!config) return null;
+    if (config.provider !== "OpenAI" && config.provider !== "Minimax") return null;
     if (!config.apiKey?.trim()) return null;
     if (config.enableSTT === false) return null;
+
+    const baseUrl = (config.baseUrl || "").trim().replace(/\/+$/, "");
+    const apiKey = config.apiKey.trim();
+
+    if (config.provider === "Minimax") {
+        return {
+            provider: "Minimax",
+            baseUrl: baseUrl || "https://api.minimaxi.com/v1",
+            apiKey,
+            model: config.sttModel?.trim() || DEFAULT_MINIMAX_STT_MODEL,
+        };
+    }
+
     return {
-        baseUrl: (config.baseUrl || "https://api.openai.com/v1").trim().replace(/\/+$/, ""),
-        apiKey: config.apiKey.trim(),
+        provider: "OpenAI",
+        baseUrl: baseUrl || "https://api.openai.com/v1",
+        apiKey,
         model: config.sttModel?.trim() || DEFAULT_STT_MODEL,
     };
 }
 
 /**
- * 解析可用的云端识别配置：优先角色绑定的语音配置（须为 OpenAI 兼容且启用 STT），
- * 否则取第一个满足条件的语音配置。没有则返回 null（通话回落到旧输入方式）。
+ * 解析可用的云端识别配置：优先角色绑定的语音配置（须为 OpenAI / MiniMax 且启用 STT），
+ * 否则取第一个满足条件的语音配置。没有则返回 null（通话回落到文字输入）。
  */
 export function resolveCloudSttConfig(characterId?: string): CloudSttConfig | null {
     const configs = loadVoiceConfigs();
@@ -72,8 +89,9 @@ export async function startCallRecording(): Promise<ActiveCallRecording> {
         throw new Error("麦克风权限被拒绝或不可用");
     });
 
-    // 优先 opus：体积小、转写接口普遍支持
-    const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]
+    // 优先 mp4(aac)：OpenAI whisper 与 MiniMax asr-1.0 都支持；
+    // webm(opus) 仅 OpenAI 认，MiniMax 不认 webm 容器。
+    const mime = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm", "audio/ogg"]
         .find(m => { try { return MediaRecorder.isTypeSupported(m); } catch { return false; } });
     const recorder = mime
         ? new MediaRecorder(stream, { mimeType: mime, audioBitsPerSecond: 32_000 })
@@ -192,7 +210,7 @@ export async function startContinuousVoice(
     const timeData = new Uint8Array(analyser.fftSize);
 
     const pickMime = () =>
-        ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]
+        ["audio/mp4", "audio/webm;codecs=opus", "audio/webm", "audio/ogg"]
             .find(m => { try { return MediaRecorder.isTypeSupported(m); } catch { return false; } });
 
     let recorder: MediaRecorder | null = null;
@@ -298,21 +316,27 @@ export async function startContinuousVoice(
     };
 }
 
-/** 调 OpenAI 兼容 /audio/transcriptions 把录音转文字。 */
+/** 调云端语音识别把录音转文字。OpenAI 走 /audio/transcriptions，MiniMax 走 /speech_to_text。 */
 export async function transcribeAudioBlob(blob: Blob, config: CloudSttConfig): Promise<string> {
     const type = (blob.type || "").toLowerCase();
     const ext = type.includes("mp4") ? "mp4"
         : type.includes("ogg") ? "ogg"
         : type.includes("wav") ? "wav"
+        : type.includes("mp3") ? "mp3"
         : "webm";
     const form = new FormData();
     form.set("model", config.model);
     form.set("file", blob, `speech.${ext}`);
 
+    // MiniMax 用 /speech_to_text，OpenAI 兼容用 /audio/transcriptions
+    const endpoint = config.provider === "Minimax"
+        ? `${config.baseUrl}/speech_to_text`
+        : `${config.baseUrl}/audio/transcriptions`;
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TRANSCRIBE_TIMEOUT_MS);
     try {
-        const res = await fetch(`${config.baseUrl}/audio/transcriptions`, {
+        const res = await fetch(endpoint, {
             method: "POST",
             headers: { Authorization: `Bearer ${config.apiKey}` },
             body: form,

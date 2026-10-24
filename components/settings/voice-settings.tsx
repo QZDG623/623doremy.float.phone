@@ -838,6 +838,16 @@ export function VoiceSettings() {
                                                         )}
                                                     </div>
                                                 </div>
+                                                <div className="flex flex-col gap-1">
+                                                    <label className="menu-desc ml-1">识别模型 (STT Model)</label>
+                                                    <Input
+                                                        type="text"
+                                                        value={config.sttModel || ""}
+                                                        onChange={(e) => updateConfig(config.id, { sttModel: e.target.value })}
+                                                        placeholder="asr-1.0（留空使用默认）"
+                                                    />
+                                                    <span className="menu-desc ml-1">通话语音输入用它把录音转成文字（非 iOS 设备生效），走同一个接口地址与密钥</span>
+                                                </div>
                                             </>
                                         )}
 
