@@ -66,6 +66,17 @@ export function useContinuousVoice(options: UseContinuousVoiceOptions): UseConti
     // 表现就是明明授权了却报「麦克风权限被拒绝」。
     const failCooldownRef = useRef(0);
     const levelAtRef = useRef(0);
+    // stop() 之后立刻重新 getUserMedia 在很多安卓机型上会 NotReadableError
+    // （旧流的音轨还没真正释放），所以记一下停止时间，重新申请前稍微等一下。
+    const lastStopAtRef = useRef(0);
+    // 调用方到底还要不要听：等待/申请期间可能被 stop() 掉（切文字模式、挂断），
+    // 申请回来时若 already not wanted 就要立刻释放，不能留下幽灵会话。
+    const wantedRef = useRef(false);
+    // 打开麦克风失败后的自动重试（有上限，避免无限刷）
+    const retryTimerRef = useRef<number | null>(null);
+    const retryCountRef = useRef(0);
+    // 让 start() 的重试逻辑能回调到自己（useCallback 自引用需要 ref）
+    const startRef = useRef<(() => Promise<void>) | null>(null);
     const optionsRef = useRef(options);
     optionsRef.current = options;
 
@@ -73,6 +84,10 @@ export function useContinuousVoice(options: UseContinuousVoiceOptions): UseConti
         mountedRef.current = true;
         return () => {
             mountedRef.current = false;
+            if (retryTimerRef.current !== null) {
+                window.clearTimeout(retryTimerRef.current);
+                retryTimerRef.current = null;
+            }
             sessionRef.current?.stop();
             sessionRef.current = null;
         };
@@ -88,7 +103,12 @@ export function useContinuousVoice(options: UseContinuousVoiceOptions): UseConti
         if (sessionRef.current || startingRef.current) return;
         if (Date.now() < failCooldownRef.current) return;
         startingRef.current = true;
+        wantedRef.current = true;
         setError("");
+        // 上一次刚 stop 掉时，音轨释放有延迟，立刻重新申请容易失败
+        const sinceStop = Date.now() - lastStopAtRef.current;
+        if (sinceStop < 350) await new Promise(r => setTimeout(r, 350 - sinceStop));
+        if (!wantedRef.current || !mountedRef.current) { startingRef.current = false; return; }
         try {
             const session = await startContinuousVoice({
                 onSpeechStart: () => {
@@ -134,8 +154,9 @@ export function useContinuousVoice(options: UseContinuousVoiceOptions): UseConti
                 },
             });
             startingRef.current = false;
-            if (!mountedRef.current) { session.stop(); return; }
+            if (!mountedRef.current || !wantedRef.current) { session.stop(); return; }
             sessionRef.current = session;
+            retryCountRef.current = 0;
             // 把最近一次的静音态灌进去（启动期间可能被改过）
             session.setMuted(mutedRef.current);
             setState("listening");
@@ -144,14 +165,34 @@ export function useContinuousVoice(options: UseContinuousVoiceOptions): UseConti
             failCooldownRef.current = Date.now() + 1500;
             fail(e instanceof Error ? e.message : String(e));
             setState("idle");
+            // 设备忙 / 音频焦点未释放这类问题是暂时的，自动重试几次让它自愈
+            if (wantedRef.current && mountedRef.current && retryCountRef.current < 6) {
+                retryCountRef.current += 1;
+                if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current);
+                retryTimerRef.current = window.setTimeout(() => {
+                    retryTimerRef.current = null;
+                    if (wantedRef.current && mountedRef.current && !sessionRef.current) {
+                        failCooldownRef.current = 0;
+                        void startRef.current?.();
+                    }
+                }, 1800);
+            }
         }
     }, [fail]);
+    startRef.current = start;
 
     const stop = useCallback(() => {
+        wantedRef.current = false;
+        retryCountRef.current = 0;
+        if (retryTimerRef.current !== null) {
+            window.clearTimeout(retryTimerRef.current);
+            retryTimerRef.current = null;
+        }
         if (sessionRef.current) {
             sessionRef.current.stop();
             sessionRef.current = null;
         }
+        lastStopAtRef.current = Date.now();
         if (mountedRef.current) {
             setState("idle");
             setLevel(0);

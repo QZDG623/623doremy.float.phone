@@ -457,7 +457,10 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
             continuousVoice.setMuted(isMuted);
             continuousVoice.start();
         } else {
-            continuousVoice.stop();
+            // AI 思考/说话期间只静音，不释放麦克风：每轮 stop 再 start 会让安卓上
+            // 旧的音频设备来不及释放，紧接着的申请就报 NotReadableError，
+            // 表现就是「系统权限开着却打不开麦克风」。
+            continuousVoice.setMuted(true);
         }
     }, [holdToTalk, callState, inputMode, isMuted, continuousVoice.start, continuousVoice.stop, continuousVoice.setMuted]);
 

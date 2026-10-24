@@ -189,19 +189,34 @@ const DEFAULT_VAD = {
     attackFrames: 3,         // 连续几帧超阈值才算开口（抗爆音）
 };
 
-/** 申请麦克风：优先带回声消除/降噪；个别 WebView 不接受对象参数时退回 audio:true */
+/**
+ * 申请麦克风。
+ *
+ * 注意：不要传 echoCancellation/noiseSuppression 这类处理约束——部分安卓 WebView
+ * 会以 OverconstrainedError 拒绝，且紧接着的第二次申请还会被壳里的权限桥接当成
+ * 「已有请求在途」而 deny，最终表现就是「系统权限明明开着却报权限被拒绝」。
+ * 这里只申请 audio: true（与 1.0.25 实测可用的写法一致），并把真实错误名带出去，
+ * 同时对设备忙（NotReadableError/AbortError）做短暂重试。
+ */
 async function openMic(): Promise<MediaStream> {
-    const want = {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-    };
-    try {
-        return await navigator.mediaDevices.getUserMedia({ audio: want });
-    } catch {
-        return await navigator.mediaDevices.getUserMedia({ audio: true })
-            .catch(() => { throw new Error("麦克风权限被拒绝或不可用"); });
+    let lastErr: unknown = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            return await navigator.mediaDevices.getUserMedia({ audio: true });
+        } catch (e) {
+            lastErr = e;
+            const name = (e as DOMException)?.name || "";
+            if (name === "NotAllowedError" || name === "SecurityError") break;
+            // 设备被占用/音频焦点未释放时等一会儿再试
+            await new Promise(r => setTimeout(r, 350));
+        }
     }
+    const name = (lastErr as DOMException)?.name || "UnknownError";
+    const detail = (lastErr as Error)?.message || "";
+    if (name === "NotAllowedError" || name === "SecurityError") {
+        throw new Error("麦克风权限被拒绝或不可用");
+    }
+    throw new Error(`麦克风打开失败（${name}${detail ? `: ${detail}` : ""}）`);
 }
 
 export async function startContinuousVoice(

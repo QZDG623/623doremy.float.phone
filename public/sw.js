@@ -22,7 +22,8 @@
 // v23：新增 MiniMax 语音识别支持 + 通话免提连续语音输入，清缓存让设备拉取新 JS。
 // v24：修复免提录音听不到声音（AudioContext 被挂起 → 电平恒 0 → VAD 不触发），
 //      并修复自动搭话面板被拖出屏幕/高度溢出导致改不了参数。
-const CACHE_VERSION = "ai-phone-pwa-v24";
+// v25：麦克风申请改回 audio:true 并带自动重试；AI 说话期间只静音不再反复释放麦克风。
+const CACHE_VERSION = "ai-phone-pwa-v25";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 
