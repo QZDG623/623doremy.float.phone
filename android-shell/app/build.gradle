@@ -52,8 +52,9 @@ android {
         // NotReadableError；浮窗服务加 microphone 前台类型，切后台后录音不被静音。
         // 1.0.29：新增 Fish Audio 语音方案（TTS + 音色同步 + 识别），可替代 Minimax 降费。
         // 1.0.30：识别方案可拆开——Fish 只负责合成，录音转文字可改选 MiniMax/OpenAI。
-        versionCode 29
-        versionName "1.0.30"
+        // 1.0.31：视频通话可换角色形象（三段差分图），说话张嘴 + 平时随机眨眼。
+        versionCode 30
+        versionName "1.0.31"
         buildConfigField "String", "SITE_URL", "\"${siteUrl}\""
     }
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { ChatSession, ChatMessage, loadChatMessages, pushChatMessage, updateChatMessage, deleteChatMessage, getLatestCharacterStateValues, resolveChatUserAvatar } from "@/lib/chat-storage";
 import { getStatusRegionConfig, isCustomStatusRegionActive } from "@/lib/chat-status-region";
 import type { StateValue } from "@/lib/chat-storage";
@@ -99,6 +99,8 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
     const [inputMode, setInputMode] = useState<"voice" | "text">(() => androidTextInputOnly ? "text" : "voice");
     const [typedText, setTypedText] = useState("");
     const [bgImageResolved, setBgImageResolved] = useState<string | null>(null);
+    /** 视频通话角色形象三层差分图（base=闭嘴睁眼，talk=张嘴，blink=闭眼） */
+    const [callFrames, setCallFrames] = useState<{ base: string | null; talk: string | null; blink: string | null }>({ base: null, talk: null, blink: null });
     const [cameraEnabled, setCameraEnabled] = useState(false);
     const [cameraFacingMode, setCameraFacingMode] = useState<"user" | "environment">("user");
     const [cameraError, setCameraError] = useState<string | null>(null);
@@ -318,6 +320,34 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
             });
         });
     }, [session.videoBackground]);
+
+    // ── Resolve 角色形象三层差分图（会话覆盖 > 角色默认） ──────
+    useEffect(() => {
+        let alive = true;
+        const ids = [
+            session.callImage || character.callImage || "",
+            session.callImageTalk || character.callImageTalk || "",
+            session.callImageBlink || character.callImageBlink || "",
+        ];
+        const resolve = async (value: string): Promise<string | null> => {
+            if (!value) return null;
+            if (value.startsWith("data:") || value.startsWith("http") || value.startsWith("blob:")) return value;
+            const { getChatImageFromIndexedDB } = await import("@/lib/chat-asset-storage");
+            return (await getChatImageFromIndexedDB(value)) || null;
+        };
+        Promise.all(ids.map(resolve)).then(([base, talk, blink]) => {
+            if (alive) setCallFrames({ base, talk, blink });
+        }).catch(() => {
+            if (alive) setCallFrames({ base: null, talk: null, blink: null });
+        });
+        return () => { alive = false; };
+    }, [session.callImage, session.callImageTalk, session.callImageBlink, character.callImage, character.callImageTalk, character.callImageBlink]);
+
+    // 说话张嘴与眨眼都交给 CSS 动画（不触发 React 重渲染，低端机也不卡帧）
+    const blinkAnim = useMemo(() => ({
+        duration: `${3.4 + Math.random() * 2.6}s`,
+        delay: `${Math.random() * 2.2}s`,
+    }), [callFrames.blink]);
 
     // ── Call timer ───────────────────────────────────
 
@@ -970,15 +1000,34 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                             <span className="ts-60 text-[var(--c-icon)]">{userNameRef.current?.[0] || "?"}</span>
                         </div>
                     )
-                ) : character.avatar ? (
-                    <img
-                        src={character.avatar}
-                        alt={character.name}
-                        className="w-full h-full object-cover transition-opacity duration-500 ease-in-out"
-                        style={{
-                            opacity: callState === "CONNECTING" ? 0.5 : 0.85,
-                        }}
-                    />
+                ) : (callFrames.base || character.avatar) ? (
+                    <div className="relative w-full h-full">
+                        <img
+                            src={(callFrames.base || character.avatar)!}
+                            alt={character.name}
+                            className="absolute inset-0 w-full h-full object-cover transition-opacity duration-500 ease-in-out"
+                            style={{
+                                opacity: callState === "CONNECTING" ? 0.5 : 0.85,
+                            }}
+                        />
+                        {callState === "AI_SPEAKING" && callFrames.talk && (
+                            <img
+                                src={callFrames.talk}
+                                alt=""
+                                aria-hidden
+                                className="absolute inset-0 w-full h-full object-cover videocall-frame-talk"
+                            />
+                        )}
+                        {callState !== "CONNECTING" && callState !== "ENDED" && callFrames.blink && (
+                            <img
+                                src={callFrames.blink}
+                                alt=""
+                                aria-hidden
+                                className="absolute inset-0 w-full h-full object-cover videocall-frame-blink"
+                                style={{ animationDuration: blinkAnim.duration, animationDelay: blinkAnim.delay }}
+                            />
+                        )}
+                    </div>
                 ) : (
                     <div className="w-[150px] h-[150px] rounded-full bg-[#333] flex items-center justify-center">
                         <span className="ts-60 text-[var(--c-icon)]">{character.name?.[0] || "?"}</span>
@@ -995,8 +1044,8 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                 title="点击切换大小画面"
             >
                 {pipSwapped ? (
-                    character.avatar ? (
-                        <img src={character.avatar} alt={character.name} className="w-full h-full object-cover" />
+                    (callFrames.base || character.avatar) ? (
+                        <img src={(callFrames.base || character.avatar)!} alt={character.name} className="w-full h-full object-cover" />
                     ) : (
                         <span className="ts-18 text-[var(--c-icon)]">{character.name?.[0] || "?"}</span>
                     )

@@ -57,6 +57,12 @@ export type ChatSession = {
     alias?: string;
     videoBackground?: string;
     voiceBackground?: string;
+    /** 视频通话角色形象：覆盖角色默认；IndexedDB 资产 ID */
+    callImage?: string;
+    /** 说话张嘴差分图（覆盖角色默认） */
+    callImageTalk?: string;
+    /** 眨眼闭眼差分图（覆盖角色默认） */
+    callImageBlink?: string;
     isBlacklisted?: boolean;
     customCSS?: string;
     isMuted?: boolean;
