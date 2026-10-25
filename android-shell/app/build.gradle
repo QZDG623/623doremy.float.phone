@@ -51,8 +51,9 @@ android {
         // 1.0.28：免提语音改用原生 AudioRecord（window.FloatMic），绕开 WebView 的
         // NotReadableError；浮窗服务加 microphone 前台类型，切后台后录音不被静音。
         // 1.0.29：新增 Fish Audio 语音方案（TTS + 音色同步 + 识别），可替代 Minimax 降费。
-        versionCode 28
-        versionName "1.0.29"
+        // 1.0.30：识别方案可拆开——Fish 只负责合成，录音转文字可改选 MiniMax/OpenAI。
+        versionCode 29
+        versionName "1.0.30"
         buildConfigField "String", "SITE_URL", "\"${siteUrl}\""
     }
 

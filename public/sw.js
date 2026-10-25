@@ -26,7 +26,8 @@
 // v26：WebView 音频采集在部分机型直接 NotReadableError，免提语音改走壳的原生
 //      AudioRecord（window.FloatMic），网页侧只轮询电平 + 取 WAV 段送识别。
 // v27：新增 Fish Audio 语音服务商（TTS + 音色同步 + 识别）。
-const CACHE_VERSION = "ai-phone-pwa-v27";
+// v28：识别方案可与合成方案分开；Fish 识别额度不足时报可操作的中文提示。
+const CACHE_VERSION = "ai-phone-pwa-v28";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 

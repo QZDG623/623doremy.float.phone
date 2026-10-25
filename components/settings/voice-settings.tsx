@@ -252,6 +252,75 @@ function providerSelectValue(config: VoiceApiConfig): string {
     return config.baseUrl === GLOBAL_MINIMAX_BASE_URL ? "MinimaxGlobal" : "MinimaxCN";
 }
 
+function voiceProviderLabel(provider: string): string {
+    if (provider === "FishAudio") return "Fish Audio";
+    if (provider === "Minimax") return "MiniMax";
+    if (provider === "OpenAI") return "OpenAI";
+    return provider;
+}
+
+/**
+ * 识别方案字段：默认用本方案（同 Key 同地址），也可以改成另一个已配置的语音方案。
+ * 常见用法：Fish Audio 合成便宜，但识别额度是要单独充值的，于是把识别交给 MiniMax/OpenAI。
+ */
+function SttSourceFields({
+    config,
+    configs,
+    updateConfig,
+    defaultModelHint,
+}: {
+    config: VoiceApiConfig;
+    configs: VoiceApiConfig[];
+    updateConfig: (id: string, updates: Partial<VoiceApiConfig>) => void;
+    defaultModelHint: string;
+}) {
+    const options = configs.filter(other => other.id !== config.id && other.apiKey?.trim() && other.enableSTT !== false);
+    const linked = config.sttConfigId ? options.find(other => other.id === config.sttConfigId) : undefined;
+    const selectValue = linked ? config.sttConfigId! : "";
+
+    return (
+        <>
+            <div className="flex flex-col gap-1">
+                <label className="menu-desc ml-1">识别方案 (STT)</label>
+                {options.length > 0 ? (
+                    <select
+                        value={selectValue}
+                        onChange={(e) => updateConfig(config.id, { sttConfigId: e.target.value || undefined })}
+                        className="ui-select"
+                    >
+                        <option value="">跟随本方案</option>
+                        {options.map(option => (
+                            <option key={option.id} value={option.id}>
+                                {option.name || voiceProviderLabel(option.provider)}（{voiceProviderLabel(option.provider)}）
+                            </option>
+                        ))}
+                    </select>
+                ) : (
+                    <span className="menu-desc ml-1">暂无可选方案：先新增一个 MiniMax / OpenAI 语音方案并填好 Key，这里就能把识别交给它</span>
+                )}
+            </div>
+            {!linked && (
+                <div className="flex flex-col gap-1">
+                    <label className="menu-desc ml-1">识别模型 (STT Model)</label>
+                    <Input
+                        type="text"
+                        value={config.sttModel || ""}
+                        onChange={(e) => updateConfig(config.id, { sttModel: e.target.value })}
+                        placeholder={defaultModelHint}
+                    />
+                </div>
+            )}
+            <span className="menu-desc ml-1">
+                {linked
+                    ? `录音转文字改用「${linked.name || voiceProviderLabel(linked.provider)}」的接口与密钥，本方案只负责说话`
+                    : config.provider === "FishAudio"
+                        ? "Fish Audio 识别按小时单独计费：额度不足时报错就改选上面的「识别方案」，或到 fish.audio 充值 API 额度"
+                        : "通话语音输入用它把录音转成文字（非 iOS 设备生效），走同一个接口地址与密钥"}
+            </span>
+        </>
+    );
+}
+
 export function VoiceSettings() {
     const { setSubpageRightAction } = useContext(SettingsContext);
     const [configs, setConfigs] = useState<VoiceApiConfig[]>([]);
@@ -805,16 +874,13 @@ export function VoiceSettings() {
                                                         </select>
                                                     )}
                                                 </div>
-                                                <div className="flex flex-col gap-1">
-                                                    <label className="menu-desc ml-1">识别模型 (STT Model)</label>
-                                                    <Input
-                                                        type="text"
-                                                        value={config.sttModel || ""}
-                                                        onChange={(e) => updateConfig(config.id, { sttModel: e.target.value })}
-                                                        placeholder="whisper-1（留空使用默认）"
-                                                    />
-                                                    <span className="menu-desc ml-1">通话「按住说话」用它把录音转成文字（非 iOS 设备生效），走同一个接口地址与密钥</span>
-                                                </div>
+                                                <SttSourceFields
+                                                    config={config}
+                                                    configs={configs}
+                                                    updateConfig={updateConfig}
+                                                    defaultModelHint="whisper-1（留空使用默认）"
+                                                />
+
                                             </>
                                         )}
 
@@ -931,16 +997,13 @@ export function VoiceSettings() {
                                                         )}
                                                     </div>
                                                 </div>
-                                                <div className="flex flex-col gap-1">
-                                                    <label className="menu-desc ml-1">识别模型 (STT Model)</label>
-                                                    <Input
-                                                        type="text"
-                                                        value={config.sttModel || ""}
-                                                        onChange={(e) => updateConfig(config.id, { sttModel: e.target.value })}
-                                                        placeholder={config.provider === "FishAudio" ? `${DEFAULT_FISH_STT_MODEL}（留空使用默认）` : "asr-1.0（留空使用默认）"}
-                                                    />
-                                                    <span className="menu-desc ml-1">通话语音输入用它把录音转成文字（非 iOS 设备生效），走同一个接口地址与密钥</span>
-                                                </div>
+                                                <SttSourceFields
+                                                    config={config}
+                                                    configs={configs}
+                                                    updateConfig={updateConfig}
+                                                    defaultModelHint={config.provider === "FishAudio" ? `${DEFAULT_FISH_STT_MODEL}（留空使用默认）` : "asr-1.0（留空使用默认）"}
+                                                />
+
                                             </>
                                         )}
 

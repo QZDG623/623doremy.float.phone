@@ -74,13 +74,23 @@ export function listCloudSttConfigs(characterId?: string): CloudSttConfig[] {
             && c.model === cloud.model);
         if (!duplicate) out.push(cloud);
     };
+    // 方案显式指定了「识别改用别的方案」时，先试被指定的那个
+    const linked = (config: VoiceApiConfig | undefined | null) => {
+        if (!config?.sttConfigId || config.sttConfigId === config.id) return undefined;
+        return configs.find(c => c.id === config.sttConfigId);
+    };
 
     if (characterId) {
         const bindings = loadBindingConfig();
         const slot = resolveBinding(bindings, characterId, "chat");
-        push(toCloudSttConfig(configs.find(c => c.id === slot.voiceConfigId)));
+        const bound = configs.find(c => c.id === slot.voiceConfigId);
+        push(toCloudSttConfig(linked(bound)));
+        push(toCloudSttConfig(bound));
     }
-    for (const config of configs) push(toCloudSttConfig(config));
+    for (const config of configs) {
+        push(toCloudSttConfig(linked(config)));
+        push(toCloudSttConfig(config));
+    }
     return out;
 }
 
@@ -539,6 +549,13 @@ async function requestTranscript(url: string, body: FormData, headers?: Record<s
                 const parsed = JSON.parse(text) as { message?: unknown };
                 if (typeof parsed.message === "string") message = parsed.message;
             } catch { /* 非 JSON */ }
+            // Fish 的原始英文报错太长，且关键是「识别要单独充值」，直接换成可操作的中文提示
+            if (/insufficient api credit/i.test(message)) {
+                message = "Fish Audio 识别额度不足（识别按小时单独计费）：请在 fish.audio 后台充值 API 额度，"
+                    + "或在语音方案里把「识别方案」改为 MiniMax/OpenAI 方案";
+            } else if (/invalid token/i.test(message)) {
+                message = "Fish Audio API Key 无效，请检查后重新填写";
+            }
             throw new Error(`语音识别 API 错误 ${res.status}: ${(message || text).slice(0, 200)}`);
         }
         const contentType = (res.headers.get("content-type") || "").toLowerCase();

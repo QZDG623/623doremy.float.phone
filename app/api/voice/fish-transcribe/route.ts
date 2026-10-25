@@ -46,8 +46,15 @@ export async function POST(request: Request) {
     const rawLanguage = form.get("language");
     const language = typeof rawLanguage === "string" ? rawLanguage.trim() : "";
 
+    // 原生桥给的是 WAV，按住说话给的是 mp4/m4a 或 webm；扩展名跟着真实 MIME 走更稳
+    const mime = (file.type || "").toLowerCase();
+    const ext = mime.includes("wav") ? "wav"
+        : mime.includes("mp4") ? "m4a"
+        : mime.includes("ogg") ? "ogg"
+        : mime.includes("mpeg") ? "mp3"
+        : "webm";
     const upstream = new FormData();
-    upstream.set("audio", file, "speech.wav");
+    upstream.set("audio", file, `speech.${ext}`);
     // 只要整段文本，不需要逐字时间戳，能省一点处理时间
     upstream.set("ignore_timestamps", "true");
     if (language) upstream.set("language", language);
