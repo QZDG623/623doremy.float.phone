@@ -50,8 +50,9 @@ android {
         // 只有括号里的内容不许念。闸门与网页清洗链都改成只删括号。
         // 1.0.28：免提语音改用原生 AudioRecord（window.FloatMic），绕开 WebView 的
         // NotReadableError；浮窗服务加 microphone 前台类型，切后台后录音不被静音。
-        versionCode 27
-        versionName "1.0.28"
+        // 1.0.29：新增 Fish Audio 语音方案（TTS + 音色同步 + 识别），可替代 Minimax 降费。
+        versionCode 28
+        versionName "1.0.29"
         buildConfigField "String", "SITE_URL", "\"${siteUrl}\""
     }
 

@@ -10,7 +10,7 @@ import { loadBindingConfig, loadVoiceConfigs, resolveBinding } from "./settings-
 import type { VoiceApiConfig } from "./settings-types";
 
 export type CloudSttConfig = {
-    provider: "OpenAI" | "Minimax";
+    provider: "OpenAI" | "Minimax" | "FishAudio";
     baseUrl: string;
     apiKey: string;
     model: string;
@@ -18,13 +18,15 @@ export type CloudSttConfig = {
 
 const DEFAULT_STT_MODEL = "whisper-1";
 const DEFAULT_MINIMAX_STT_MODEL = "asr-1.0";
+const DEFAULT_FISH_BASE_URL = "https://api.fish.audio";
+const DEFAULT_FISH_STT_MODEL = "transcribe-1";
 const TRANSCRIBE_TIMEOUT_MS = 60_000;
 // 录音兜底上限：忘记松手/指针事件丢失时自动停，避免无限占用麦克风
 const MAX_RECORDING_MS = 60_000;
 
 function toCloudSttConfig(config: VoiceApiConfig | undefined | null): CloudSttConfig | null {
     if (!config) return null;
-    if (config.provider !== "OpenAI" && config.provider !== "Minimax") return null;
+    if (config.provider !== "OpenAI" && config.provider !== "Minimax" && config.provider !== "FishAudio") return null;
     if (!config.apiKey?.trim()) return null;
     if (config.enableSTT === false) return null;
 
@@ -40,6 +42,15 @@ function toCloudSttConfig(config: VoiceApiConfig | undefined | null): CloudSttCo
         };
     }
 
+    if (config.provider === "FishAudio") {
+        return {
+            provider: "FishAudio",
+            baseUrl: baseUrl || DEFAULT_FISH_BASE_URL,
+            apiKey,
+            model: config.sttModel?.trim() || DEFAULT_FISH_STT_MODEL,
+        };
+    }
+
     return {
         provider: "OpenAI",
         baseUrl: baseUrl || "https://api.openai.com/v1",
@@ -49,23 +60,36 @@ function toCloudSttConfig(config: VoiceApiConfig | undefined | null): CloudSttCo
 }
 
 /**
- * 解析可用的云端识别配置：优先角色绑定的语音配置（须为 OpenAI / MiniMax 且启用 STT），
- * 否则取第一个满足条件的语音配置。没有则返回 null（通话回落到文字输入）。
+ * 列出所有可用的云端识别配置（角色绑定优先），用于一个失败时自动换下一个
+ * （典型场景：MiniMax 余额不足 402，但账户里还配了 Fish Audio / OpenAI）。
  */
-export function resolveCloudSttConfig(characterId?: string): CloudSttConfig | null {
+export function listCloudSttConfigs(characterId?: string): CloudSttConfig[] {
     const configs = loadVoiceConfigs();
+    const out: CloudSttConfig[] = [];
+    const push = (cloud: CloudSttConfig | null) => {
+        if (!cloud) return;
+        const duplicate = out.some(c => c.provider === cloud.provider
+            && c.baseUrl === cloud.baseUrl
+            && c.apiKey === cloud.apiKey
+            && c.model === cloud.model);
+        if (!duplicate) out.push(cloud);
+    };
+
     if (characterId) {
         const bindings = loadBindingConfig();
         const slot = resolveBinding(bindings, characterId, "chat");
-        const bound = configs.find(c => c.id === slot.voiceConfigId);
-        const fromBound = toCloudSttConfig(bound);
-        if (fromBound) return fromBound;
+        push(toCloudSttConfig(configs.find(c => c.id === slot.voiceConfigId)));
     }
-    for (const config of configs) {
-        const cloud = toCloudSttConfig(config);
-        if (cloud) return cloud;
-    }
-    return null;
+    for (const config of configs) push(toCloudSttConfig(config));
+    return out;
+}
+
+/**
+ * 解析可用的云端识别配置：优先角色绑定的语音配置（须启用 STT），
+ * 否则取第一个满足条件的语音配置。没有则返回 null（通话回落到文字输入）。
+ */
+export function resolveCloudSttConfig(characterId?: string): CloudSttConfig | null {
+    return listCloudSttConfigs(characterId)[0] ?? null;
 }
 
 /**
@@ -457,17 +481,30 @@ export async function startContinuousVoice(
     };
 }
 
-/** 调云端语音识别把录音转文字。OpenAI 走 /audio/transcriptions，MiniMax 走 /speech_to_text。 */
+/** 调云端语音识别把录音转文字。OpenAI 走 /audio/transcriptions，MiniMax 走 /speech_to_text，
+ *  Fish Audio 走服务端中转 /api/voice/fish-transcribe（上游 /v1/asr）。 */
 export async function transcribeAudioBlob(blob: Blob, config: CloudSttConfig): Promise<string> {
     const type = (blob.type || "").toLowerCase();
     const isMinimax = config.provider === "Minimax";
+    const isFish = config.provider === "FishAudio";
     // MiniMax 认 wav/aiff/flac/m4a(mp4 容器)/mp3/aac/opus/ogg，不认 webm 容器；
     // MediaRecorder 产出的 audio/mp4 就是 m4a，扩展名按 m4a 传更稳。
-    const ext = type.includes("mp4") ? (isMinimax ? "m4a" : "mp4")
+    const ext = type.includes("mp4") ? (isMinimax || isFish ? "m4a" : "mp4")
         : type.includes("ogg") ? "ogg"
         : type.includes("wav") ? "wav"
         : type.includes("mp3") ? "mp3"
         : "webm";
+
+    if (isFish) {
+        // Key 与接口地址放在表单里，由同源服务端转发（Fish 没开 CORS）。
+        const fishForm = new FormData();
+        fishForm.set("apiKey", config.apiKey);
+        fishForm.set("baseUrl", config.baseUrl);
+        fishForm.set("model", config.model);
+        fishForm.set("file", blob, `speech.${ext}`);
+        return await requestTranscript("/api/voice/fish-transcribe", fishForm);
+    }
+
     const form = new FormData();
     form.set("model", config.model);
     if (isMinimax) form.set("response_format", "json");
@@ -478,18 +515,31 @@ export async function transcribeAudioBlob(blob: Blob, config: CloudSttConfig): P
         ? `${config.baseUrl}/speech_to_text`
         : `${config.baseUrl}/audio/transcriptions`;
 
+    return await requestTranscript(endpoint, form, {
+        Authorization: `Bearer ${config.apiKey}`,
+    });
+}
+
+/** 统一的识别请求 + JSON 解析（MiniMax / OpenAI 直连，Fish 走中转）。 */
+async function requestTranscript(url: string, body: FormData, headers?: Record<string, string>): Promise<string> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TRANSCRIBE_TIMEOUT_MS);
     try {
-        const res = await fetch(endpoint, {
+        const res = await fetch(url, {
             method: "POST",
-            headers: { Authorization: `Bearer ${config.apiKey}` },
-            body: form,
+            ...(headers ? { headers } : {}),
+            body,
             signal: controller.signal,
         });
         if (!res.ok) {
             const text = await res.text().catch(() => "");
-            throw new Error(`语音识别 API 错误 ${res.status}: ${text.slice(0, 200)}`);
+            // Fish 中转返回 { error, message }，优先把 message 抛出来
+            let message = "";
+            try {
+                const parsed = JSON.parse(text) as { message?: unknown };
+                if (typeof parsed.message === "string") message = parsed.message;
+            } catch { /* 非 JSON */ }
+            throw new Error(`语音识别 API 错误 ${res.status}: ${(message || text).slice(0, 200)}`);
         }
         const contentType = (res.headers.get("content-type") || "").toLowerCase();
         if (contentType.includes("json")) {
@@ -517,4 +567,21 @@ export async function transcribeAudioBlob(blob: Blob, config: CloudSttConfig): P
     } finally {
         clearTimeout(timer);
     }
+}
+
+/** 依次尝试所有可用识别配置（角色绑定优先），前一个失败自动换下一个。 */
+export async function transcribeAudioBlobWithFallback(blob: Blob, characterId?: string): Promise<string> {
+    const configs = listCloudSttConfigs(characterId);
+    if (!configs.length) throw new Error("未找到可用的语音识别配置");
+    let lastError: unknown = null;
+    for (const config of configs) {
+        try {
+            const text = await transcribeAudioBlob(blob, config);
+            if (text.trim()) return text;
+        } catch (e) {
+            lastError = e;
+        }
+    }
+    if (lastError) throw lastError instanceof Error ? lastError : new Error(String(lastError));
+    return "";
 }

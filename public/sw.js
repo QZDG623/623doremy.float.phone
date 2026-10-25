@@ -25,7 +25,8 @@
 // v25：麦克风申请改回 audio:true 并带自动重试；AI 说话期间只静音不再反复释放麦克风。
 // v26：WebView 音频采集在部分机型直接 NotReadableError，免提语音改走壳的原生
 //      AudioRecord（window.FloatMic），网页侧只轮询电平 + 取 WAV 段送识别。
-const CACHE_VERSION = "ai-phone-pwa-v26";
+// v27：新增 Fish Audio 语音服务商（TTS + 音色同步 + 识别）。
+const CACHE_VERSION = "ai-phone-pwa-v27";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 

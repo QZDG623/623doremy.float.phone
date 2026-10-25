@@ -18,9 +18,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-    resolveCloudSttConfig,
     startContinuousVoice,
-    transcribeAudioBlob,
+    transcribeAudioBlobWithFallback,
     type ContinuousVoiceSession,
 } from "@/lib/stt-cloud";
 
@@ -121,9 +120,7 @@ export function useContinuousVoice(options: UseContinuousVoiceOptions): UseConti
                     setState("transcribing");
                     optionsRef.current.onTranscribeStart?.();
                     try {
-                        const config = resolveCloudSttConfig(optionsRef.current.characterId);
-                        if (!config) { fail("未找到可用的语音识别配置"); return; }
-                        const text = await transcribeAudioBlob(blob, config);
+                        const text = await transcribeAudioBlobWithFallback(blob, optionsRef.current.characterId);
                         if (!mountedRef.current) return;
                         if (text.trim()) {
                             setError("");
