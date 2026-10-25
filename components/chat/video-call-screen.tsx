@@ -101,6 +101,8 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
     const [bgImageResolved, setBgImageResolved] = useState<string | null>(null);
     /** 视频通话角色形象三层差分图（base=闭嘴睁眼，talk=张嘴，blink=闭眼） */
     const [callFrames, setCallFrames] = useState<{ base: string | null; talk: string | null; blink: string | null }>({ base: null, talk: null, blink: null });
+    /** 真正有声音在播时才张嘴（合成阶段不张嘴，避免「没声音却一直在动」） */
+    const [isAudioPlaying, setIsAudioPlaying] = useState(false);
     const [cameraEnabled, setCameraEnabled] = useState(false);
     const [cameraFacingMode, setCameraFacingMode] = useState<"user" | "environment">("user");
     const [cameraError, setCameraError] = useState<string | null>(null);
@@ -205,6 +207,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
         if (isSpeakerMuted && audioAbortRef.current) {
             audioAbortRef.current();
             audioAbortRef.current = null;
+            setIsAudioPlaying(false);
         }
     }, [isSpeakerMuted]);
 
@@ -576,8 +579,13 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                         });
                         const { promise, abort } = playCallAudio(audioBlob);
                         audioAbortRef.current = abort;
-                        await promise;
-                        audioAbortRef.current = null;
+                        setIsAudioPlaying(true);
+                        try {
+                            await promise;
+                        } finally {
+                            setIsAudioPlaying(false);
+                            audioAbortRef.current = null;
+                        }
                     }
                 } catch (e) { console.warn("[VideoCall] TTS failed:", e); }
             }
@@ -787,8 +795,13 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
             if (!blob) return;
             const { promise, abort } = playCallAudio(blob);
             audioAbortRef.current = abort;
-            await promise;
-            audioAbortRef.current = null;
+            setIsAudioPlaying(true);
+            try {
+                await promise;
+            } finally {
+                setIsAudioPlaying(false);
+                audioAbortRef.current = null;
+            }
         } catch (e) {
             console.warn("[VideoCall] replay failed:", e);
         } finally {
@@ -1010,7 +1023,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                                 opacity: callState === "CONNECTING" ? 0.5 : 0.85,
                             }}
                         />
-                        {callState === "AI_SPEAKING" && callFrames.talk && (
+                        {isAudioPlaying && callFrames.talk && (
                             <img
                                 src={callFrames.talk}
                                 alt=""

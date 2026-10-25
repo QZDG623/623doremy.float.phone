@@ -53,8 +53,9 @@ android {
         // 1.0.29：新增 Fish Audio 语音方案（TTS + 音色同步 + 识别），可替代 Minimax 降费。
         // 1.0.30：识别方案可拆开——Fish 只负责合成，录音转文字可改选 MiniMax/OpenAI。
         // 1.0.31：视频通话可换角色形象（三段差分图），说话张嘴 + 平时随机眨眼。
-        versionCode 30
-        versionName "1.0.31"
+        // 1.0.32：张嘴节奏放慢到正常语速（约 3 次/秒），且只在真正播放语音时才动。
+        versionCode 31
+        versionName "1.0.32"
         buildConfigField "String", "SITE_URL", "\"${siteUrl}\""
     }
 
