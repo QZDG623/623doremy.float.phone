@@ -421,30 +421,32 @@ class PerceptionBridge(private val context: Context) {
      *
      * 「在看什么」用不着单独实现：前台应用（foregroundApp）已经回答了。
      */
-    fun nowPlayingJson(): JSONObject = try {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) {
-            return JSONObject().put("available", false).put("reason", "系统版本太低")
+    fun nowPlayingJson(): JSONObject {
+        return try {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) {
+                return JSONObject().put("available", false).put("reason", "系统版本太低")
+            }
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val listener = ComponentName(context, MediaControlListenerService::class.java)
+            if (!nm.isNotificationListenerAccessGranted(listener)) {
+                return JSONObject().put("available", false).put("reason", "需要通知使用权")
+            }
+            val msm = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
+            val sessions = msm.getActiveSessions(listener)
+            val playing = sessions.firstOrNull {
+                it.playbackState?.state == android.media.session.PlaybackState.STATE_PLAYING
+            } ?: return JSONObject().put("available", true).put("playing", false)
+            val md = playing.metadata
+            JSONObject()
+                .put("available", true)
+                .put("playing", true)
+                .put("package", playing.packageName)
+                .put("app", appLabel(playing.packageName))
+                .put("title", md?.getString(android.media.MediaMetadata.METADATA_KEY_TITLE).orEmpty())
+                .put("artist", md?.getString(android.media.MediaMetadata.METADATA_KEY_ARTIST).orEmpty())
+        } catch (e: Throwable) {
+            JSONObject().put("available", false).put("reason", e.message ?: "读取失败")
         }
-        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val listener = ComponentName(context, MediaControlListenerService::class.java)
-        if (!nm.isNotificationListenerAccessGranted(listener)) {
-            return JSONObject().put("available", false).put("reason", "需要通知使用权")
-        }
-        val msm = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
-        val sessions = msm.getActiveSessions(listener)
-        val playing = sessions.firstOrNull {
-            it.playbackState?.state == android.media.session.PlaybackState.STATE_PLAYING
-        } ?: return JSONObject().put("available", true).put("playing", false)
-        val md = playing.metadata
-        JSONObject()
-            .put("available", true)
-            .put("playing", true)
-            .put("package", playing.packageName)
-            .put("app", appLabel(playing.packageName))
-            .put("title", md?.getString(android.media.MediaMetadata.METADATA_KEY_TITLE).orEmpty())
-            .put("artist", md?.getString(android.media.MediaMetadata.METADATA_KEY_ARTIST).orEmpty())
-    } catch (e: Throwable) {
-        JSONObject().put("available", false).put("reason", e.message ?: "读取失败")
     }
 
     // ── 使用情况（屏幕使用时间）─────────────────────────────
