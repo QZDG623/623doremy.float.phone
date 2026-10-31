@@ -2,13 +2,19 @@ package app.floatphone.shell
 
 import android.Manifest
 import android.app.AppOpsManager
+import android.app.NotificationManager
 import android.app.usage.UsageStatsManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
+import android.media.session.MediaSessionManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.BatteryManager
@@ -17,6 +23,10 @@ import android.os.Process
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Calendar
+import kotlin.math.abs
+import kotlin.math.log10
+import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 /**
  * 感知桥：把手机自身的状态交给网页。
@@ -55,6 +65,29 @@ class PerceptionBridge(private val context: Context) {
         private var sensorAttached = false
 
         /**
+         * 重力向量的两个分量（低通滤波后的加速度计读数）。
+         * 用来判断手机是「平放着（多半躺着）」还是「竖着（坐着/站着）」。
+         */
+        @Volatile
+        private var gravityY: Float = Float.NaN
+
+        @Volatile
+        private var gravityZ: Float = Float.NaN
+
+        @Volatile
+        private var accelAttached = false
+
+        /** 上一次取「设备动作」时的步数累计值与时刻，用来算这段走了多少步。 */
+        private var lastMotionAt = 0L
+        private var lastMotionSteps = -1f
+
+        /** 降噪采样用的锁：并发读只会互相抢麦克风，直接让后来的返回「稍后再说」。 */
+        private val noiseLock = Object()
+        private var noiseSampling = false
+        private const val NOISE_SAMPLE_RATE = 16000
+        private const val NOISE_SAMPLE_MS = 400
+
+        /**
          * 挂上步数传感器监听。幂等：重复调用不会挂第二个。
          *
          * 由 MainActivity 在启动时调用；网页侧首次读步数时也会补挂一次，
@@ -82,6 +115,39 @@ class PerceptionBridge(private val context: Context) {
                 sensorAttached = true
             } catch (e: Throwable) {
                 // 传感器不可用时静默降级：步数一直读不到，网页侧会省略这一项
+            }
+        }
+
+        /**
+         * 挂上加速度计（低通滤波出重力方向），用来判断「躺 / 坐站」。
+         *
+         * 用 SENSOR_DELAY_UI：这个速率（约 16Hz）对判断姿态绰绰有余，
+         * 又比游戏/最快档省电得多。只在 App 进程活着时挂，进程没了自然停。
+         * 不申请额外权限（加速度计属于零权限传感器）。
+         */
+        @JvmStatic
+        fun attachMotionSensor(context: Context) {
+            if (accelAttached) return
+            try {
+                val sm = context.applicationContext
+                    .getSystemService(Context.SENSOR_SERVICE) as SensorManager
+                val sensor = sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) ?: return
+                sm.registerListener(object : SensorEventListener {
+                    override fun onSensorChanged(event: SensorEvent) {
+                        val values = event.values
+                        if (values.size < 3) return
+                        // 低通：把快速抖动滤掉，只留下重力方向（典型公式 0.8 新 + 0.2 旧）
+                        val y = if (gravityY.isNaN()) values[1] else gravityY * 0.8f + values[1] * 0.2f
+                        val z = if (gravityZ.isNaN()) values[2] else gravityZ * 0.8f + values[2] * 0.2f
+                        gravityY = y
+                        gravityZ = z
+                    }
+
+                    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+                }, sensor, SensorManager.SENSOR_DELAY_UI)
+                accelAttached = true
+            } catch (e: Throwable) {
+                // 没有加速度计（极少见）→ 姿态未知，仍可按步数判断走/静
             }
         }
     }
@@ -213,6 +279,174 @@ class PerceptionBridge(private val context: Context) {
         return "${c.get(Calendar.YEAR)}-${c.get(Calendar.MONTH) + 1}-${c.get(Calendar.DAY_OF_MONTH)}"
     }
 
+    // ── 设备动作（走 / 静止 / 躺）─────────────────────────────
+
+    /**
+     * 此刻的「设备动作」判断。
+     *
+     * 只用两个零权限传感器的组合，不接 Google Play 的活动识别 API：
+     *   · 步数变化率 → 在走；每分钟 ≥ 8 步算走动（正常步行约 100 步/分钟，
+     *     阈值取得低是宁可报「走」，也别把慢走漏成「静止」）；
+     *   · 重力方向 → 躺。手机平放（|z| 明显大于 |y|）多半是躺着刷手机；
+     *     竖着则是坐着/站着，统一按「静止」报。
+     *
+     * 与步数一样，第一次调用只建立基准（此时步数差为 -1，判为静止），
+     * 绝不拿一个假的「走了 0 步」当结论。
+     */
+    fun motionJson(): JSONObject = try {
+        attachMotionSensor(context)
+        attachStepSensor(context)
+        val now = System.currentTimeMillis()
+        val steps = cumulativeSteps
+        val minutes = if (lastMotionAt > 0L) (now - lastMotionAt) / 60_000.0 else 0.0
+        val delta = if (steps >= 0f && lastMotionSteps >= 0f) steps - lastMotionSteps else -1f
+        lastMotionAt = now
+        if (steps >= 0f) lastMotionSteps = steps
+
+        val posture = when {
+            gravityZ.isNaN() -> "unknown"
+            abs(gravityZ) > 6.5f && abs(gravityZ) > abs(gravityY) -> "flat"
+            abs(gravityY) > 6.5f -> "upright"
+            else -> "unknown"
+        }
+        val perMinute = if (minutes > 0.2 && delta >= 0f) delta / minutes else -1.0
+        val activity = when {
+            perMinute >= 8.0 -> "walk"
+            posture == "flat" -> "lying"
+            posture == "upright" -> "still"
+            else -> "unknown"
+        }
+        JSONObject()
+            .put("activity", activity)
+            .put("posture", posture)
+            .put("stepsDelta", if (delta >= 0f) delta.toInt() else -1)
+            .put("perMinute", if (perMinute >= 0.0) perMinute.roundToInt() else -1)
+    } catch (e: Throwable) {
+        JSONObject()
+    }
+
+    // ── 环境噪音 ──────────────────────────────────────────
+
+    /**
+     * 测一次环境噪音，返回近似的分贝数与响度档位。
+     *
+     * 说明两件事，免得被误解成专业声级计：
+     *   1. 手机麦克风没有校准，换算出来的 dB 是「近似值」——用来判断
+     *      「安静 / 正常 / 吵」足够，不能拿去和真正的声级计比数字；
+     *   2. 只采样 0.4 秒、由网页按低频调用。不做持续监听，也不保留音频
+     *      （读完的 PCM 立刻丢掉），只回一个数字。
+     *
+     * 需要 RECORD_AUDIO（与通话录音共用同一个权限）。
+     */
+    fun noiseJson(): JSONObject {
+        if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            return JSONObject().put("available", false).put("reason", "没有录音权限")
+        }
+        synchronized(noiseLock) {
+            if (noiseSampling) {
+                return JSONObject().put("available", false).put("reason", "上一次采样还没结束")
+            }
+            noiseSampling = true
+        }
+        var record: AudioRecord? = null
+        return try {
+            val minBuffer = AudioRecord.getMinBufferSize(
+                NOISE_SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+            )
+            val samples = NOISE_SAMPLE_RATE * NOISE_SAMPLE_MS / 1000
+            val bufferSize = maxOf(minBuffer, samples * 2)
+            val rec = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                NOISE_SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bufferSize,
+            )
+            record = rec
+            if (rec.state != AudioRecord.STATE_INITIALIZED) {
+                return JSONObject().put("available", false).put("reason", "麦克风打不开")
+            }
+            val buffer = ShortArray(samples)
+            rec.startRecording()
+            var read = 0
+            while (read < samples) {
+                val n = rec.read(buffer, read, samples - read)
+                if (n <= 0) break
+                read += n
+            }
+            rec.stop()
+
+            if (read <= 0) return JSONObject().put("available", false).put("reason", "没读到音频")
+
+            var sum = 0.0
+            for (i in 0 until read) {
+                val v = buffer[i].toDouble()
+                sum += v * v
+            }
+            val rms = sqrt(sum / read)
+            // dBFS（相对满量程）→ 近似 dB SPL：各机型麦克风增益不同，取 +90 这个
+            // 常见经验偏移，结果只用于「安静/正常/吵」的档位判断。
+            val dbfs = if (rms > 0.0) 20.0 * log10(rms / 32768.0) else -96.0
+            val db = (dbfs + 90.0).roundToInt().coerceIn(0, 120)
+            JSONObject()
+                .put("available", true)
+                .put("db", db)
+                .put("dbfs", dbfs.roundToInt())
+                .put("level", if (db < 40) "quiet" else if (db < 60) "normal" else "loud")
+        } catch (e: Throwable) {
+            JSONObject().put("available", false).put("reason", e.message ?: "测量失败")
+        } finally {
+            runCatching {
+                record?.let {
+                    if (it.recordingState == AudioRecord.RECORDSTATE_RECORDING) it.stop()
+                    it.release()
+                }
+            }
+            synchronized(noiseLock) { noiseSampling = false }
+        }
+    }
+
+    // ── 当前在听 / 在看什么 ────────────────────────────────
+
+    /**
+     * 当前正在播放的媒体（歌名/歌手/是哪个 App）。
+     *
+     * 走 MediaSessionManager，需要用户给「通知使用权」（MediaControlListenerService
+     * 就是为这个资格存在的）。没有授权时返回 available=false + 原因，
+     * 不假装「没在听」——两者对用户是完全不同的两件事。
+     *
+     * 「在看什么」用不着单独实现：前台应用（foregroundApp）已经回答了。
+     */
+    fun nowPlayingJson(): JSONObject = try {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) {
+            return JSONObject().put("available", false).put("reason", "系统版本太低")
+        }
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val listener = ComponentName(context, MediaControlListenerService::class.java)
+        if (!nm.isNotificationListenerAccessGranted(listener)) {
+            return JSONObject().put("available", false).put("reason", "需要通知使用权")
+        }
+        val msm = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
+        val sessions = msm.getActiveSessions(listener)
+        val playing = sessions.firstOrNull {
+            it.playbackState?.state == android.media.session.PlaybackState.STATE_PLAYING
+        } ?: return JSONObject().put("available", true).put("playing", false)
+        val md = playing.metadata
+        JSONObject()
+            .put("available", true)
+            .put("playing", true)
+            .put("package", playing.packageName)
+            .put("app", appLabel(playing.packageName))
+            .put("title", md?.getString(android.media.MediaMetadata.METADATA_KEY_TITLE).orEmpty())
+            .put("artist", md?.getString(android.media.MediaMetadata.METADATA_KEY_ARTIST).orEmpty())
+    } catch (e: Throwable) {
+        JSONObject().put("available", false).put("reason", e.message ?: "读取失败")
+    }
+
     // ── 使用情况（屏幕使用时间）─────────────────────────────
 
     /**
@@ -244,22 +478,12 @@ class PerceptionBridge(private val context: Context) {
     }
 
     /**
-     * 读「今天各应用用了多久」，按使用时长降序返回 JSON 数组。
-     *
-     * 每条只有三个字段：package / label / minutes。
-     * 刻意**不返回**使用的时间点、启动次数、具体页面——「用了多久」已经
-     * 足够让角色说一句「你今天刷了好久的视频」，而时间点会暴露作息细节，
-     * 属于不必要的隐私放大。
-     *
-     * 未授权、系统不支持、查询异常都返回空数组：调用方据此说「读不到」，
-     * 而不是拿到一堆假数据。
-     *
-     * @param maxEntries 最多返回几条（按时长降序取前 N）。默认 12。
+     * 今天各应用的前台使用时长（包名 → 毫秒），按包名累加。
+     * 未授权 / 系统不支持 / 查询异常一律返回空 Map。
      */
-    fun usageStatsJson(maxEntries: Int): String {
-        val result = JSONArray()
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return result.toString()
-        if (!hasUsageStatsAccess()) return result.toString()
+    private fun usageByPackage(): Map<String, Long> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return emptyMap()
+        if (!hasUsageStatsAccess()) return emptyMap()
         return try {
             val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
             val now = System.currentTimeMillis()
@@ -272,8 +496,7 @@ class PerceptionBridge(private val context: Context) {
                 set(Calendar.MILLISECOND, 0)
             }.timeInMillis
             val stats = usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, begin, now)
-                ?: return result.toString()
-
+                ?: return emptyMap()
             // 同一包名可能返回多条（分桶），先按包名累加
             val totalByPackage = HashMap<String, Long>()
             for (stat in stats) {
@@ -282,28 +505,68 @@ class PerceptionBridge(private val context: Context) {
                 if (ms <= 0L) continue
                 totalByPackage[pkg] = (totalByPackage[pkg] ?: 0L) + ms
             }
-
-            val limit = maxEntries.coerceIn(1, 50)
-            val top = totalByPackage.entries
-                .sortedByDescending { it.value }
-                .take(limit)
-
-            for ((pkg, ms) in top) {
-                val minutes = (ms / 60_000L).toInt()
-                // 不足一分钟的不列：那种多半是系统组件被拉起一下，
-                // 报给角色只会变成噪声。
-                if (minutes < 1) continue
-                result.put(
-                    JSONObject()
-                        .put("package", pkg)
-                        .put("label", appLabel(pkg))
-                        .put("minutes", minutes),
-                )
-            }
-            result.toString()
+            totalByPackage
         } catch (e: Throwable) {
-            result.toString()
+            emptyMap()
         }
+    }
+
+    private fun usageEntries(maxEntries: Int): Pair<Int, JSONArray> {
+        val result = JSONArray()
+        val totalByPackage = usageByPackage()
+        if (totalByPackage.isEmpty()) return 0 to result
+        val limit = maxEntries.coerceIn(1, 50)
+        for ((pkg, ms) in totalByPackage.entries.sortedByDescending { it.value }.take(limit)) {
+            val minutes = (ms / 60_000L).toInt()
+            // 不足一分钟的不列：那种多半是系统组件被拉起一下，
+            // 报给角色只会变成噪声。
+            if (minutes < 1) continue
+            result.put(
+                JSONObject()
+                    .put("package", pkg)
+                    .put("label", appLabel(pkg))
+                    .put("minutes", minutes),
+            )
+        }
+        val totalMinutes = (totalByPackage.values.sum() / 60_000L).toInt()
+        return totalMinutes to result
+    }
+
+    /**
+     * 读「今天各应用用了多久」，按使用时长降序返回 JSON 数组。
+     *
+     * 每条只有三个字段：package / label / minutes。
+     * 刻意**不返回**使用的时间点、启动次数、具体页面——「用了多久」已经
+     * 足够让角色说一句「你今天刷了好久的视频」，而时间点会暴露作息细节，
+     * 属于不必要的隐私放大。
+     *
+     * 未授权、系统不支持、查询异常都返回空数组：调用方据此说「读不到」，
+     * 而不是拿到一堆假数据。
+     *
+     * @param maxEntries 最多返回几条（按时长降序取前 N）。默认 12。
+     */
+    fun usageStatsJson(maxEntries: Int): String = usageEntries(maxEntries).second.toString()
+
+    /**
+     * 屏幕使用总时长 + 各应用时长。
+     *
+     * 与 usageStatsJson 的差别只有一个：多回一个「今天亮屏用了多久」的合计
+     * （screenMinutes）。合计是所有应用前台时长之和，不是系统自己的
+     * 「屏幕点亮时长」——两者数值接近，但后者要额外的系统权限。
+     *
+     * @return `{"available":true,"screenMinutes":123,"apps":[...]}`；
+     *         读不到时 available=false，绝不报一个 0 分钟。
+     */
+    fun screenUsageJson(maxEntries: Int): String {
+        val (totalMinutes, apps) = usageEntries(maxEntries)
+        if (apps.length() == 0) {
+            return JSONObject().put("available", false).put("apps", JSONArray()).toString()
+        }
+        return JSONObject()
+            .put("available", true)
+            .put("screenMinutes", totalMinutes)
+            .put("apps", apps)
+            .toString()
     }
 
     /**
@@ -314,6 +577,7 @@ class PerceptionBridge(private val context: Context) {
         .put("battery", batteryJson())
         .put("network", networkJson())
         .put("steps", stepsJson())
+        .put("motion", motionJson())
         .toString()
 
     /**
@@ -346,8 +610,38 @@ class PerceptionBridge(private val context: Context) {
         // 混为一谈会让用户以为手机不支持、从而放弃授权。
         .put("usageStats", Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP)
         .put("usageStatsGranted", hasUsageStatsAccess())
+        // 屏幕使用总时长与「各应用时长」是同一份数据的两种呈现，能力一起报。
+        .put("screenUsage", Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP)
+        // 设备动作：步数+加速度计组合。步数需要活动识别权限（Android 10+），
+        // 加速度计零权限；只要能拿到步数就够判断「走」。
+        .put("motion", Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && stepPermissionOk())
+        // 环境噪音：麦克风 + 录音权限（与通话共用）。
+        .put(
+            "noise",
+            context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+        )
+        // 当前在听什么：通知使用权（MediaControlListenerService 的绑定资格）。
+        .put("nowPlaying", notificationListenerOk())
         // 睡眠接的是 Health Connect（见 HealthBridge）：能力上是支持的，
         // 「装没装 / 授没授权」另由健康桥回答——不在这里报，免得两处状态打架。
         .put("sleep", true)
         .toString()
+
+    /** 活动识别权限是否已给（步数与设备动作的前提）。 */
+    private fun stepPermissionOk(): Boolean = try {
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+            context.checkSelfPermission(Manifest.permission.ACTIVITY_RECOGNITION) ==
+            PackageManager.PERMISSION_GRANTED
+    } catch (e: Throwable) {
+        false
+    }
+
+    /** 通知使用权是否已给（读活跃媒体会话的前提）。 */
+    private fun notificationListenerOk(): Boolean = try {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) false
+        else (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+            .isNotificationListenerAccessGranted(ComponentName(context, MediaControlListenerService::class.java))
+    } catch (e: Throwable) {
+        false
+    }
 }

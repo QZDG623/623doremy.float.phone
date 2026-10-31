@@ -1219,6 +1219,35 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   useEffect(() => {
     activeAppRef.current = activeApp;
   }, [activeApp]);
+
+  /**
+   * 侧滑/返回键：由安卓壳主动调用（见 MainActivity.handleBackPress）。
+   *
+   * 为什么放在网页做：网页的「导航栈」是 activeApp 这个 state，WebView 的
+   * canGoBack() 永远是 false（整个小手机只有一个 URL）。以前壳只问 canGoBack，
+   * 于是一侧滑就直接退到系统桌面。现在壳先问网页，网页按「先关当前 App、
+   * 再回桌面」的顺序处理，返回 true 表示已消化；返回 false 壳才退出。
+   *
+   * 同时派发一个可取消的 float:back 事件：某个 App 内部还有二级/三级页面
+   * （比如设置里的子面板）时，它可以自己 preventDefault 去关子页面，
+   * 不必改这个文件。
+   */
+  useEffect(() => {
+    const handler = (): boolean => {
+      const event = new CustomEvent("float:back", { cancelable: true });
+      if (!window.dispatchEvent(event)) return true;
+      if (activeAppRef.current) {
+        setActiveApp(null);
+        return true;
+      }
+      return false;
+    };
+    (window as unknown as { __floatHandleBack?: () => boolean }).__floatHandleBack = handler;
+    return () => {
+      const w = window as unknown as { __floatHandleBack?: () => boolean };
+      if (w.__floatHandleBack === handler) delete w.__floatHandleBack;
+    };
+  }, []);
   // Listen for theme CSS updates from 小卷
   useEffect(() => {
     const onThemeUpdate = () => {

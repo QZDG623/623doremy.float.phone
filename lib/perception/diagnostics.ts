@@ -105,7 +105,8 @@ export function buildCapabilityRows(): CapabilityRow[] {
   const health = readHealthCapabilities();
 
   const ids: PerceptionCapability[] = [
-    "battery", "network", "foregroundApp", "steps", "location", "sleep", "calendar", "contacts", "usageStats", "returnToPhone", "lifeRhythm",
+    "battery", "network", "foregroundApp", "steps", "motion", "noise", "nowPlaying",
+    "screenUsage", "usageStats", "location", "sleep", "calendar", "contacts", "returnToPhone", "lifeRhythm",
   ];
 
   return ids.map(id => {
@@ -125,6 +126,22 @@ export function buildCapabilityRows(): CapabilityRow[] {
     // 使用统计：能力已接通，但需要特殊权限（去系统设置手动开），卡在这一环
     if (id === "usageStats" && nativeSupported && native.usageStatsGranted !== true) {
       missingRequirement = "需要「使用情况访问」权限（系统设置里手动开）";
+    }
+    // 屏幕使用总时长与使用统计是同一份数据，同一道权限闸。
+    if (id === "screenUsage" && nativeSupported && native.usageStatsGranted !== true) {
+      missingRequirement = "需要「使用情况访问」权限（系统设置里手动开）";
+    }
+    // 设备动作：新壳才提供；支持但为 false = 活动识别权限没给。
+    if (id === "motion" && !nativeSupported) {
+      missingRequirement = "需要更新 APK，或先授予活动识别权限";
+    }
+    // 噪音：新壳才提供；支持但为 false = 录音权限没给。
+    if (id === "noise" && !nativeSupported) {
+      missingRequirement = "需要更新 APK，或先授予录音权限";
+    }
+    // 当前在听：需要通知使用权（系统设置里手动开）。
+    if (id === "nowPlaying" && !nativeSupported) {
+      missingRequirement = "需要「通知使用权」（系统设置里手动开），或更新 APK";
     }
     // 定位：两层前置，且必须分开报——「权限给了但定位开关关着」是最容易
     // 被漏掉的一种（用户会以为权限都给了怎么还读不到）。

@@ -50,6 +50,17 @@ export type PerceptionCapability =
   | "usageStats"
   | "steps"
   | "sleep"
+  /**
+   * 设备动作：走 / 静止 / 躺。原生用步数变化率 + 加速度计重力方向判断，
+   * 不接 Google Play 的活动识别（国内机型不一定有）。
+   */
+  | "motion"
+  /** 环境噪音（近似分贝）。原生采样 0.4 秒，只回一个数字，不保留音频。 */
+  | "noise"
+  /** 当前在听什么（歌名/歌手/App）。需要「通知使用权」。 */
+  | "nowPlaying"
+  /** 屏幕使用总时长（今天各应用前台时长之和）。与 usageStats 同一份数据。 */
+  | "screenUsage"
   | "returnToPhone"
   /**
    * 作息与习惯：深夜还醒着、今天第一次打开、很久没来聊天。
@@ -78,6 +89,10 @@ export const PERCEPTION_CAPABILITY_LABEL: Record<PerceptionCapability, string> =
   usageStats: "使用统计",
   steps: "步数",
   sleep: "睡眠",
+  motion: "设备运动",
+  noise: "环境噪音",
+  nowPlaying: "当前在听",
+  screenUsage: "屏幕使用时长",
   returnToPhone: "回到手机提醒",
   lifeRhythm: "作息与习惯",
   deviceAction: "设备操作",
@@ -93,6 +108,10 @@ export const PERCEPTION_CAPABILITY_DESC: Record<PerceptionCapability, string> = 
   usageStats: "汇总当天各应用使用时长；某个应用累计用满设定时长时报一条「应用用太久」。需要「使用情况访问」权限。",
   steps: "读取当天步数，作为「在走动 / 宅着」的粗线索。需要活动识别权限。",
   sleep: "读取最近一觉的时长与起止。只读睡眠，不含睡眠分期；数据来自 Health Connect。",
+  motion: "走 / 静止 / 躺。用步数变化率与加速度计的重力方向判断，状态变化时告诉角色。需要活动识别权限。",
+  noise: "隔一段时间测一次环境噪音，太吵时告诉角色。需要录音权限；只测 0.4 秒，不保留音频。",
+  nowPlaying: "正在听的歌名/歌手/是哪个 App。需要「通知使用权」。",
+  screenUsage: "今天屏幕一共用了多久（各应用前台时长之和），随使用统计一起给角色看。需要「使用情况访问」权限。",
   returnToPhone: "离开一段时间后回到小手机时，给角色一个「TA 回来了」的信号。纯网页实现，无需额外权限。",
   lifeRhythm: "深夜还醒着、今天第一次打开小手机、很久没来聊天时给角色一个信号。纯网页实现，无需额外权限。",
   deviceAction: "角色在真实手机上执行的动作（手电筒、音量、亮度、勿扰、打开应用等），记进流水供你回查。",
@@ -253,6 +272,27 @@ export type PerceptionLogEntry = {
   skipped?: string;
 };
 
+/** 设备动作（走 / 静止 / 躺）。 */
+export type MotionSnapshot = {
+  /** walk = 在走；still = 静止（坐着/站着）；lying = 手机平放，多半躺着 */
+  activity: "walk" | "still" | "lying" | "unknown";
+  /** 屏幕朝向：flat = 平放；upright = 竖着；unknown = 没有加速度计 */
+  posture: "flat" | "upright" | "unknown";
+  /** 距上次取样的步数增量；-1 = 未知 */
+  stepsDelta: number;
+  /** 每分钟步数；-1 = 未知 */
+  perMinute: number;
+};
+
+/** 当前正在播放的媒体。 */
+export type NowPlayingSnapshot = {
+  playing: boolean;
+  /** 播放 App 的显示名 */
+  app: string;
+  title: string;
+  artist: string;
+};
+
 /** 设备状态缓存：引擎每次采样后写入，供「注入 / 主动查询 / 云端同步」三处读取。 */
 export type PerceptionStatusSnapshot = {
   /** 采集时刻 */
@@ -269,6 +309,14 @@ export type PerceptionStatusSnapshot = {
   foregroundMinutes: number;
   /** 当天步数，-1 = 未知 */
   steps: number;
+  /** 设备动作；null = 未开启 / 读不到 */
+  motion: MotionSnapshot | null;
+  /** 环境噪音（近似分贝）；-1 = 未开启 / 读不到 */
+  noiseDb: number;
+  /** 当前在听什么；null = 未开启 / 没在听 / 读不到 */
+  nowPlaying: NowPlayingSnapshot | null;
+  /** 今天屏幕使用总时长（分钟）；-1 = 未授权 / 读不到 */
+  screenMinutes: number;
   /** 今天各应用使用时长（按时长降序，最多 12 条）；空数组 = 未授权或读不到 */
   appUsage: AppUsageEntry[];
   /**

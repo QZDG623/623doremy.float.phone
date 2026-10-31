@@ -12,7 +12,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Activity, AlertCircle, BarChart3, Battery, Calendar, Cloud,
-  Footprints, MapPin, Moon, Plus, RefreshCw, ShieldCheck, Smartphone, Sunrise, Trash2, Users, Wifi,
+  Footprints, MapPin, MonitorSmartphone, Moon, Music, PersonStanding, Plus,
+  RefreshCw, ShieldCheck, Smartphone, Sunrise, Trash2, Users, Waves, Wifi,
 } from "lucide-react";
 
 import { Toggle } from "@/components/ui/form";
@@ -56,6 +57,10 @@ const CAP_ICONS: Record<PerceptionCapability, typeof Battery> = {
   contacts: Users,
   usageStats: BarChart3,
   steps: Footprints,
+  motion: PersonStanding,
+  noise: Waves,
+  nowPlaying: Music,
+  screenUsage: MonitorSmartphone,
   returnToPhone: Activity,
   lifeRhythm: Sunrise,
   // deviceAction 不出现在能力列表里（没有开关），但 Record 要求每个能力都有条目。
@@ -168,6 +173,22 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
     if (id === "usageStats") {
       openSystemSettings("usage_stats");
       onNotice?.("请在系统设置里允许「使用情况访问」");
+      return;
+    }
+    // 屏幕使用总时长与使用统计共用同一道权限。
+    if (id === "screenUsage") {
+      openSystemSettings("usage_stats");
+      onNotice?.("请在系统设置里允许「使用情况访问」");
+      return;
+    }
+    if (id === "noise") {
+      openSystemSettings("app_details");
+      onNotice?.("请在应用权限里允许「麦克风」，允许后噪音才能测到");
+      return;
+    }
+    if (id === "nowPlaying") {
+      openSystemSettings("notification_listener");
+      onNotice?.("请在「通知使用权」里开启小手机，开启后才知道你在听什么");
     }
   }, [onNotice]);
 

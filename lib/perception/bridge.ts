@@ -10,6 +10,8 @@ import type {
   HealthDiagnostics,
   LocationDiagnostics,
   LocationSnapshot,
+  MotionSnapshot,
+  NowPlayingSnapshot,
   PerceptionCapability,
   SleepSnapshot,
 } from "./types";
@@ -21,6 +23,10 @@ type PerceptionBridgeLike = {
   hasStepPermission?: () => boolean;
   requestStepPermission?: () => boolean;
   readUsageStats?: (maxEntries: number) => string;
+  readScreenUsage?: (maxEntries: number) => string;
+  getMotionSnapshot?: () => string;
+  readNoiseDb?: () => string;
+  readNowPlaying?: () => string;
   getLocationCapabilities?: () => string;
   hasLocationPermission?: () => boolean;
   requestLocationPermission?: () => boolean;
@@ -57,6 +63,8 @@ export type DeviceSnapshot = {
   network: { type: string; metered: boolean };
   /** 当天步数；-1 = 原生不支持或未授权（老 APK / 未开活动识别权限） */
   steps: number;
+  /** 设备动作；null = 老壳不支持 / 没有加速度计 */
+  motion: MotionSnapshot | null;
 };
 
 /** 取设备快照。失败返回 null（调用方按「本轮跳过」处理）。 */
@@ -64,8 +72,20 @@ export function readPerceptionSnapshot(): DeviceSnapshot | null {
   try {
     const raw = bridge()?.getPerceptionSnapshot?.();
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<DeviceSnapshot>;
+    const parsed = JSON.parse(raw) as Partial<DeviceSnapshot> & {
+      motion?: Partial<MotionSnapshot> | null;
+    };
     if (!parsed || typeof parsed !== "object") return null;
+    const activity = parsed.motion?.activity;
+    const posture = parsed.motion?.posture;
+    const motion: MotionSnapshot | null = activity || posture
+      ? {
+        activity: activity === "walk" || activity === "still" || activity === "lying" ? activity : "unknown",
+        posture: posture === "flat" || posture === "upright" ? posture : "unknown",
+        stepsDelta: Number.isFinite(Number(parsed.motion?.stepsDelta)) ? Number(parsed.motion?.stepsDelta) : -1,
+        perMinute: Number.isFinite(Number(parsed.motion?.perMinute)) ? Number(parsed.motion?.perMinute) : -1,
+      }
+      : null;
     return {
       battery: {
         percent: Number(parsed.battery?.percent ?? -1),
@@ -76,6 +96,7 @@ export function readPerceptionSnapshot(): DeviceSnapshot | null {
         metered: parsed.network?.metered !== false,
       },
       steps: Number.isFinite(Number(parsed.steps)) ? Number(parsed.steps) : -1,
+      motion,
     };
   } catch {
     return null;
@@ -145,6 +166,114 @@ export function readUsageStats(maxEntries = 12): AppUsageEntry[] {
 /** 壳是否提供使用统计读取（老 APK 没有）。 */
 export function supportsUsageStats(): boolean {
   return typeof bridge()?.readUsageStats === "function";
+}
+
+/** 屏幕使用总时长 + 各应用时长（今天）。读不到返回 null。 */
+export type ScreenUsageRead = { screenMinutes: number; appUsage: AppUsageEntry[] };
+
+export function readScreenUsage(maxEntries = 12): ScreenUsageRead | null {
+  try {
+    const raw = bridge()?.readScreenUsage?.(maxEntries);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as {
+      available?: boolean;
+      screenMinutes?: number;
+      apps?: AppUsageEntry[];
+    };
+    if (!parsed || parsed.available !== true) return null;
+    const apps = Array.isArray(parsed.apps) ? parsed.apps.filter(item => (
+      !!item && typeof item.package === "string" && Number.isFinite(item.minutes)
+    )) : [];
+    if (apps.length === 0) return null;
+    return {
+      screenMinutes: Number.isFinite(Number(parsed.screenMinutes)) ? Number(parsed.screenMinutes) : -1,
+      appUsage: apps,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** 壳是否支持屏幕使用总时长读取。 */
+export function supportsScreenUsage(): boolean {
+  return typeof bridge()?.readScreenUsage === "function";
+}
+
+/** 读一次设备动作（走/静止/躺）。壳不支持或读不到返回 null。 */
+export function readMotion(): MotionSnapshot | null {
+  try {
+    const raw = bridge()?.getMotionSnapshot?.();
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<MotionSnapshot>;
+    const activity = parsed?.activity;
+    if (!activity) return null;
+    return {
+      activity: activity === "walk" || activity === "still" || activity === "lying" ? activity : "unknown",
+      posture: parsed?.posture === "flat" || parsed?.posture === "upright" ? parsed.posture : "unknown",
+      stepsDelta: Number.isFinite(Number(parsed?.stepsDelta)) ? Number(parsed?.stepsDelta) : -1,
+      perMinute: Number.isFinite(Number(parsed?.perMinute)) ? Number(parsed?.perMinute) : -1,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** 壳是否支持设备动作读取。 */
+export function supportsMotion(): boolean {
+  return typeof bridge()?.getMotionSnapshot === "function";
+}
+
+/** 测一次环境噪音；读不到返回 null（noiseDb 单位是近似 dB）。 */
+export function readNoiseDb(): { db: number; level: "quiet" | "normal" | "loud" } | null {
+  try {
+    const raw = bridge()?.readNoiseDb?.();
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { available?: boolean; db?: number; level?: string };
+    if (!parsed || parsed.available !== true) return null;
+    const db = Number(parsed.db);
+    if (!Number.isFinite(db)) return null;
+    return {
+      db,
+      level: parsed.level === "loud" ? "loud" : parsed.level === "normal" ? "normal" : "quiet",
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** 壳是否支持噪音测量。 */
+export function supportsNoise(): boolean {
+  return typeof bridge()?.readNoiseDb === "function";
+}
+
+/** 读一次「当前在听什么」。没在听 / 读不到都返回 null。 */
+export function readNowPlaying(): NowPlayingSnapshot | null {
+  try {
+    const raw = bridge()?.readNowPlaying?.();
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as {
+      available?: boolean;
+      playing?: boolean;
+      app?: string;
+      title?: string;
+      artist?: string;
+    };
+    if (!parsed || parsed.available !== true || parsed.playing !== true) return null;
+    const app = String(parsed.app ?? "");
+    const title = String(parsed.title ?? "");
+    const artist = String(parsed.artist ?? "");
+    // 没有任何可读信息时（有些媒体 App 不提供元数据）就说「在听某某 App」，
+    // 至少保留 App 名，不要返回一个全空的壳。
+    if (!app && !title) return null;
+    return { playing: true, app, title, artist };
+  } catch {
+    return null;
+  }
+}
+
+/** 壳是否支持「当前在听」。 */
+export function supportsNowPlaying(): boolean {
+  return typeof bridge()?.readNowPlaying === "function";
 }
 
 /** 位置桥上报的能力与授权状态（老壳/浏览器返回空对象）。 */
@@ -308,7 +437,13 @@ export function readSleep(): SleepSnapshot | null {
   try {
     const raw = bridge()?.readSleep?.();
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<SleepSnapshot>;
+    // 原生回的是 {sleepMinutes, sleepStartAt, sleepEndAt}（见 HealthBridge），
+    // 与这里的返回类型（minutes/startAt/endAt）是两套命名，转一次。
+    const parsed = JSON.parse(raw) as {
+      sleepMinutes?: number;
+      sleepStartAt?: number;
+      sleepEndAt?: number;
+    };
     const minutes = Number(parsed?.sleepMinutes);
     const endAt = Number(parsed?.sleepEndAt);
     const startAt = Number(parsed?.sleepStartAt);

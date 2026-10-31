@@ -41,7 +41,7 @@ type ShellBridgeLike = {
 };
 
 /** 原生浮窗事件 */
-export type ShellOverlayAction = "restore" | "hangup" | "reply" | "tick" | "needPermission" | "accessibility" | "foregroundApp" | "screenshot" | "checkIn" | "userReply";
+export type ShellOverlayAction = "restore" | "hangup" | "reply" | "tick" | "needPermission" | "accessibility" | "foregroundApp" | "screenshot" | "checkIn" | "userReply" | "screen-tick";
 
 export type ShellOverlayEvent = {
     action: ShellOverlayAction;

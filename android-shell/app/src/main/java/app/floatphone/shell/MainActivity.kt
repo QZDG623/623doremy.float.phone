@@ -32,9 +32,11 @@ import android.webkit.DownloadListener
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
@@ -61,7 +63,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         val SITE_URL: String = BuildConfig.SITE_URL
-        const val VERSION = "1.0.35"
+        const val VERSION = "1.0.36"
         /** 来电接听等场景的站内深链（必须以 SITE_URL 开头，否则忽略） */
         const val EXTRA_OPEN_URL = "open_url"
         /** 外部 App（如桌宠）唤起本壳用的自定义 scheme：floatshell://open?url=<站内地址> */
@@ -83,6 +85,12 @@ class MainActivity : AppCompatActivity() {
 
     /** 本次是「覆盖安装后的首启」，需要在页面加载完成后清一次网页缓存并重载。 */
     private var purgeWebCachePending = false
+
+    /** 渲染进程已经崩溃、WebView 已被我们自己销毁（onDestroy 不能再 destroy 第二次）。 */
+    private var rendererCrashed = false
+
+    /** 正在问网页「这一下返回你处理吗」，避免连按两次弹出两个回调。 */
+    private var backHandling = false
 
     /** 系统状态栏实际高度（CSS px，即物理像素 / density），实时更新。 */
     @Volatile
@@ -321,6 +329,8 @@ class MainActivity : AppCompatActivity() {
         // 步数传感器是异步的（没有同步取值接口），必须提前挂上才有值可读。
         // 这里只是「挂监听」，不申请权限；没授权时 attachStepSensor 内部会直接返回。
         PerceptionBridge.attachStepSensor(this)
+        // 加速度计（零权限）用来判断「躺/坐站」，进程活着就能读。
+        PerceptionBridge.attachMotionSensor(this)
         // 登记给 ShellBus：浮窗服务/无障碍服务要把事件投回页面，需要这个引用。
         // WebView 只能在主线程访问，投递时由 ShellBus 统一 post 到主线程。
         ShellBus.webView = webView
@@ -346,6 +356,28 @@ class MainActivity : AppCompatActivity() {
                 // 语音兜底闸门：拦掉发往 MiniMax 的括号标签/英文，网页是哪一版都生效。
                 TtsGuard.install()
                 if (purgeWebCachePending) purgeServiceWorkerCachesThenReload()
+            }
+
+            /**
+             * 渲染进程被系统杀掉（低内存最常见）时的自愈。
+             *
+             * 返回 true = 我们自己处理，系统不再把整个 App 一起杀掉。此时
+             * **不能**再碰这个 WebView（它已失效），只能丢掉它并重建 Activity：
+             * 聊天记录/设置都在 IndexedDB 与 localStorage 里，重开后原样读回，
+             * 用户看到的是「界面恢复了一下」，而不是「闪退了、数据全没了」。
+             */
+            override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                rendererCrashed = true
+                if (ShellBus.webView === view) ShellBus.webView = null
+                runCatching { (view.parent as? ViewGroup)?.removeView(view) }
+                runCatching { view.destroy() }
+                Toast.makeText(
+                    this@MainActivity,
+                    if (detail.didCrash()) "界面出错了，正在恢复…" else "内存不足，界面正在恢复…",
+                    Toast.LENGTH_LONG,
+                ).show()
+                rootContainer.post { if (!isFinishing && !isDestroyed) recreate() }
+                return true
             }
         }
 
@@ -407,7 +439,7 @@ class MainActivity : AppCompatActivity() {
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (webView.canGoBack()) webView.goBack() else moveTaskToBack(true)
+                handleBackPress()
             }
         })
 
@@ -438,6 +470,42 @@ class MainActivity : AppCompatActivity() {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
         return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
+
+    /**
+     * 返回键 / 侧边滑动返回。
+     *
+     * 顺序：先问网页（window.__floatHandleBack）。
+     *   · 网页开着某个 App  → 网页关掉它并返回 true，壳什么都不用做（回到桌面）；
+     *   · 网页在桌面        → 返回 false，壳按 WebView 历史回退；
+     *   · 没有历史可回退    → 才退到系统桌面（moveTaskToBack）。
+     *
+     * evaluateJavascript 的回调是异步的，所以这里不能同步决定；回调在 UI 线程
+     * 执行，正好可以安全地操作 WebView。
+     */
+    private fun handleBackPress() {
+        if (rendererCrashed || webView.isDestroyed) { fallbackBack(); return }
+        if (backHandling) { fallbackBack(); return }
+        backHandling = true
+        runCatching {
+            webView.evaluateJavascript(
+                "(function(){try{return !!(window.__floatHandleBack && window.__floatHandleBack()===true)}catch(e){return false}})()",
+            ) { value ->
+                backHandling = false
+                // 网页已经消化（关掉了一个 App）：停在桌面，不退系统。
+                if (value == "true") return@evaluateJavascript
+                fallbackBack()
+            }
+        }.onFailure {
+            backHandling = false
+            fallbackBack()
+        }
+    }
+
+    /** 网页没有消化这一下返回：先回历史，没有历史就退到系统桌面。 */
+    private fun fallbackBack() {
+        if (!rendererCrashed && !webView.isDestroyed && webView.canGoBack()) webView.goBack()
+        else moveTaskToBack(true)
     }
 
     /**
@@ -620,7 +688,9 @@ class MainActivity : AppCompatActivity() {
         // 原生麦克风：Activity 没了就别再占着录音设备
         MicBridge.detach()
         CookieManager.getInstance().flush()
-        webView.destroy()
+        // 渲染进程崩溃时 onRenderProcessGone 已经销毁过这个 WebView，
+        // 再 destroy 一次会撞 "WebView is not in a valid state" 的崩溃。
+        if (!rendererCrashed) webView.destroy()
         super.onDestroy()
     }
 
@@ -703,6 +773,28 @@ class MainActivity : AppCompatActivity() {
          */
         @JavascriptInterface
         fun readUsageStats(maxEntries: Int): String = perception.usageStatsJson(maxEntries)
+
+        /** 屏幕使用总时长 + 各应用时长（{available,screenMinutes,apps}）。 */
+        @JavascriptInterface
+        fun readScreenUsage(maxEntries: Int): String = perception.screenUsageJson(maxEntries)
+
+        /** 此刻设备动作：{activity: walk/still/lying/unknown, posture, stepsDelta, perMinute}。 */
+        @JavascriptInterface
+        fun getMotionSnapshot(): String = perception.motionJson().toString()
+
+        /**
+         * 测一次环境噪音：{available,db,dbfs,level}。
+         * 需要录音权限；采样 0.4 秒，不保留音频。
+         */
+        @JavascriptInterface
+        fun readNoiseDb(): String = perception.noiseJson().toString()
+
+        /**
+         * 当前在听什么：{available,playing,app,title,artist}。
+         * 需要「通知使用权」；未授权时回 available=false + 原因。
+         */
+        @JavascriptInterface
+        fun readNowPlaying(): String = perception.nowPlayingJson().toString()
 
         /** 活动识别权限是否已授予（步数感知的前提）。 */
         @JavascriptInterface
@@ -1184,6 +1276,42 @@ class MainActivity : AppCompatActivity() {
         /** 截屏桥的内部状态快照（诊断面板用，不含任何画面内容）。 */
         @JavascriptInterface
         fun getScreenshotDiagnostics(): String = ScreenshotBridge.diagnosticsJson()
+
+        // ── 读整屏文字 / 字幕气泡 / 自主看屏节拍 ────────────
+
+        /**
+         * 读当前屏幕上的文字（无障碍遍历，不截图）。
+         * 返回 {available, text, package}；错误时 {available:false, reason}。
+         */
+        @JavascriptInterface
+        fun readScreenText(): String = ScreenshotBridge.readScreenText()
+
+        /** 显示一条字幕气泡；durationMs<=0 表示常驻。 */
+        @JavascriptInterface
+        fun showSubtitle(text: String, durationMs: Int): Boolean =
+            ScreenshotBridge.showSubtitle(text, durationMs)
+
+        /** 收起字幕气泡。 */
+        @JavascriptInterface
+        fun hideSubtitle() {
+            ScreenshotBridge.hideSubtitle()
+        }
+
+        /**
+         * 开始自主看屏节拍：每 seconds 秒往网页推一条 screen-tick 事件。
+         * 网页在后台时 JS 定时器会被冻结，所以节拍由原生托管；要不要生成、
+         * 几轮停由网页决定。seconds<=0 等价于停止。
+         */
+        @JavascriptInterface
+        fun startScreenTicker(seconds: Int) {
+            ScreenshotBridge.startTicker(seconds)
+        }
+
+        /** 停止自主看屏节拍。 */
+        @JavascriptInterface
+        fun stopScreenTicker() {
+            ScreenshotBridge.stopTicker()
+        }
 
         /** 查岗浮层的内部状态快照（诊断面板用）。 */
         @JavascriptInterface

@@ -28,15 +28,20 @@ import {
   hasPerceptionBridge,
   readAppLabel,
   readLocation,
+  readNoiseDb,
+  readNowPlaying,
   readPerceptionSnapshot,
+  readScreenUsage,
   readSleep,
   readUsageStats,
   refreshHealth,
   refreshLocation,
   supportsHealth,
   supportsLocation,
+  supportsNoise,
+  supportsNowPlaying,
+  supportsScreenUsage,
   supportsUsageStats,
-  type AppUsageEntry,
 } from "./bridge";
 import { syncPerceptionToCloud } from "./cloud-sync";
 import {
@@ -49,9 +54,25 @@ import {
   savePerceptionStatus,
   type PerceptionRuntimeState,
 } from "./storage";
-import type { PerceptionCapability, PerceptionConfig, PerceptionSignal } from "./types";
+import type {
+  AppUsageEntry,
+  MotionSnapshot,
+  NowPlayingSnapshot,
+  PerceptionCapability,
+  PerceptionConfig,
+  PerceptionSignal,
+} from "./types";
 
 const HOUR_MS = 60 * 60 * 1000;
+
+/** 「屏幕用太久」的当天总时长阈值（分钟）。每天最多报一条。 */
+const SCREEN_LONG_MINUTES = 360;
+/** 每多少轮采样测一次噪音（麦克风采样较贵，默认 60 秒一轮 ≈ 5 分钟一次）。 */
+const NOISE_SAMPLE_EVERY = 5;
+/** 超过这个近似分贝才算「吵」，只在由安静变吵时报一次。 */
+const NOISE_LOUD_DB = 65;
+/** 噪音取样轮次计数器（进程内即可，不需要持久化）。 */
+let noiseTick = 0;
 
 let timer: number | null = null;
 let unsubscribeForeground: (() => void) | null = null;
@@ -208,13 +229,111 @@ async function sampleOnce(): Promise<void> {
   // 因为用户可能一直停在同一个应用、不再产生新事件，靠事件驱动会永远等不到。
   await checkDwell(config.appDwellMinutes, state);
 
-  // ── 应用累计使用 ──
+  // ── 应用累计使用 / 屏幕使用总时长 ──
   // 每轮采样只读一次使用统计，喂给信号判定，再随状态缓存复用给
   // 「注入 / 主动查询 / 云端同步」。读两次结果是同一份，纯属白花开销。
-  const appUsage = supportsUsageStats() && isCapabilityEnabled(config, "usageStats")
-    ? readUsageStats(12)
-    : ([] as AppUsageEntry[]);
+  //
+  // 「屏幕使用总时长」与「各应用时长」是同一份数据的两种呈现：
+  // 新壳一次调用就同时给出两者，老壳只能给各应用时长——后者就把总时长留 -1，
+  // 不拿「各应用之和」冒充（系统组件不计入，算出来会偏小）。
+  let screenMinutes = -1;
+  let appUsage: AppUsageEntry[] = [];
+  const wantUsage = isCapabilityEnabled(config, "usageStats");
+  const wantScreenUsage = isCapabilityEnabled(config, "screenUsage");
+  if (wantScreenUsage && supportsScreenUsage()) {
+    const read = readScreenUsage(12);
+    if (read) {
+      screenMinutes = read.screenMinutes;
+      appUsage = read.appUsage;
+    }
+  } else if (wantUsage && supportsUsageStats()) {
+    appUsage = readUsageStats(12);
+  }
   await checkAppUsageSignal(config, state, appUsage);
+  if (wantScreenUsage && screenMinutes >= SCREEN_LONG_MINUTES) {
+    const today = localDayKey();
+    if (state.dailySignalDate[DAILY_KEY_SCREEN_LONG] !== today) {
+      const hours = Math.floor(screenMinutes / 60);
+      const mins = screenMinutes % 60;
+      const delivered = await emitSignal({
+        capability: "screenUsage",
+        type: "屏幕用太久",
+        payload: `今天屏幕已经用了 ${hours > 0 ? `${hours} 小时` : ""}${mins > 0 ? `${mins} 分钟` : ""}`,
+      }, state);
+      if (delivered) state.dailySignalDate[DAILY_KEY_SCREEN_LONG] = today;
+    }
+  }
+
+  // ── 设备动作（走 / 静止 / 躺）──
+  // 原生已经给出结论（步数变化率 + 重力方向），这里只管「结论变了要不要说话」。
+  // 读到 unknown（没传感器 / 没活动识别权限）时不更新基准——
+  // 否则一次读取失败就会把「躺下」的上一状态清空，下一次恢复时误报。
+  const motion = (isCapabilityEnabled(config, "motion") && snapshot.motion
+    ? snapshot.motion
+    : null) as MotionSnapshot | null;
+  if (motion && motion.activity !== "unknown") {
+    const prev = state.lastMotionActivity;
+    if (prev && prev !== motion.activity) {
+      const type = motion.activity === "walk"
+        ? "在走动"
+        : motion.activity === "lying"
+          ? "躺下了"
+          : prev === "lying" ? "坐起来了" : "停下来了";
+      await emitSignal({
+        capability: "motion",
+        type,
+        payload: motion.activity === "walk" && motion.perMinute > 0
+          ? `大约每分钟 ${motion.perMinute} 步`
+          : "",
+      }, state);
+    }
+    state.lastMotionActivity = motion.activity;
+  }
+
+  // ── 环境噪音 ──
+  // 麦克风采样比读传感器贵，也更像「在监听」，所以每 5 轮采样才测一次
+  // （默认 60 秒一轮 → 约 5 分钟一次），足够捕捉「环境变吵了」。
+  // 只在「由安静变吵」时报一次；一直吵着不会每分钟念一遍。
+  let noiseDb = -1;
+  if (isCapabilityEnabled(config, "noise") && supportsNoise()) {
+    noiseTick += 1;
+    if (noiseTick % NOISE_SAMPLE_EVERY === 1) {
+      const noise = readNoiseDb();
+      if (noise) {
+        noiseDb = noise.db;
+        const wasQuiet = state.lastNoiseDb < 0 || state.lastNoiseDb < NOISE_LOUD_DB;
+        if (noise.db >= NOISE_LOUD_DB && wasQuiet) {
+          await emitSignal({
+            capability: "noise",
+            type: "环境变吵了",
+            payload: `大约 ${Math.round(noise.db)} 分贝`,
+          }, state);
+        }
+        state.lastNoiseDb = noise.db;
+      }
+    }
+  }
+
+  // ── 当前在听什么 ──
+  // 只在「开始播放」与「换了一首」时报；同一首歌循环播放不重复报。
+  // 没在听（暂停 / 没开媒体）不发信号，但要把基准清空，
+  // 这样下次重新播放同一首也算「开始听」。
+  let nowPlaying: NowPlayingSnapshot | null = null;
+  if (isCapabilityEnabled(config, "nowPlaying") && supportsNowPlaying()) {
+    nowPlaying = readNowPlaying();
+    const key = nowPlaying ? `${nowPlaying.app}|${nowPlaying.title}|${nowPlaying.artist}` : "";
+    if (nowPlaying && key !== state.lastNowPlayingKey) {
+      const title = nowPlaying.title || "一首没标题的歌";
+      await emitSignal({
+        capability: "nowPlaying",
+        type: state.lastNowPlayingKey ? "换了一首歌" : "开始听歌",
+        payload: nowPlaying.artist
+          ? `${title} - ${nowPlaying.artist}`
+          : `${title}${nowPlaying.app ? `（${nowPlaying.app}）` : ""}`,
+      }, state);
+    }
+    state.lastNowPlayingKey = key;
+  }
 
   // ── 作息与习惯 ──
   // 纯时钟信号（深夜/首次打开/很久没聊天）与采样间隔无关；
@@ -267,6 +386,10 @@ async function sampleOnce(): Promise<void> {
       ? Math.max(0, Math.floor((Date.now() - state.dwellSince) / 60000))
       : 0,
     steps: snapshot.steps,
+    motion,
+    noiseDb,
+    nowPlaying,
+    screenMinutes,
     appUsage,
     location,
     sleep,
@@ -392,6 +515,7 @@ const DAILY_KEY_LATE_NIGHT = "lateNight";
 const DAILY_KEY_FIRST_OPEN = "firstOpen";
 const DAILY_KEY_NO_TALK = "noTalk";
 const DAILY_KEY_BEDTIME = "bedtime";
+const DAILY_KEY_SCREEN_LONG = "screenLong";
 
 /**
  * 深夜还醒着。

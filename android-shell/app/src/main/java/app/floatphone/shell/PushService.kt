@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.ConnectivityManager
 import android.os.Build
 import android.os.IBinder
 import android.util.Base64
@@ -72,13 +73,31 @@ class PushService : Service() {
     private var notifId = 100
     private var shellSubRegistered = false
 
+    /** 重连等待用的锁：网络恢复时打断睡眠，立刻重连，而不是干等退避时间。 */
+    private val wakeLock = Object()
+
+    /** 当前常驻通知上显示的文案。只在变化时才 notify，避免每秒刷一次通知栏。 */
+    private var statusText = ""
+
+    /** 最近一次连上的时刻；0 = 还没连过。断线提示里带上它，用户能看出「多久没连上了」。 */
+    @Volatile
+    private var lastConnectedAt = 0L
+
+    /** 最近一次断开的原因（人话，如「网络不可达」「服务器 401」），写进常驻通知。 */
+    @Volatile
+    private var lastCloseReason = ""
+
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         running = true
         createChannels()
-        startForeground(NOTIF_FG_ID, buildKeepAliveNotification("等待连接…"))
+        statusText = "等待连接…"
+        startForeground(NOTIF_FG_ID, buildKeepAliveNotification(statusText))
+        watchNetwork()
         thread(name = "shell-push-loop") { connectionLoop() }
     }
 
@@ -88,7 +107,44 @@ class PushService : Service() {
         stopped = true
         running = false
         socket?.cancel()
+        runCatching {
+            networkCallback?.let {
+                (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager)
+                    .unregisterNetworkCallback(it)
+            }
+        }
+        networkCallback = null
+        // 打断可能正在退避睡眠的重连线程，让它及时看到 stopped。
+        synchronized(wakeLock) { wakeLock.notifyAll() }
         super.onDestroy()
+    }
+
+    /**
+     * 网络一旦恢复就立刻重连。
+     *
+     * 后台长连接最常掉线的场景是「锁屏/切网」：WiFi 断开、移动数据切换、息屏后
+     * 系统回收网络。以前只能靠指数退避干等（最长两分钟），用户看到的就是
+     * 「后台一直收不到消息」。系统告诉我们网络回来了，就不要再等。
+     */
+    private fun watchNetwork() {
+        if (networkCallback != null) return
+        runCatching {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) {
+                    synchronized(wakeLock) { wakeLock.notifyAll() }
+                }
+            }
+            cm.registerDefaultNetworkCallback(callback)
+            networkCallback = callback
+        }
+    }
+
+    /** 更新常驻通知文案（同文案不重复 notify）。 */
+    private fun setStatus(text: String) {
+        if (text == statusText) return
+        statusText = text
+        updateKeepAlive(text)
     }
 
     // ── 连接循环：拿配置 → 连 WS → 断线退避重连 ──
@@ -97,15 +153,15 @@ class PushService : Service() {
         while (!stopped) {
             val config = fetchConfig()
             if (config == null) {
-                updateKeepAlive("未登录或站点不可达，稍后重试")
-                sleepSec(60); continue
+                setStatus("未连接：${lastCloseReason.ifEmpty { "站点不可达" }}，稍后重试")
+                waitSec(60); continue
             }
-            updateKeepAlive("已连接，等待角色消息")
             val closedNormally = runSocket(config)
             if (stopped) break
-            updateKeepAlive("连接断开，重连中…")
-            sleepSec(if (closedNormally) 3 else backoffSec)
-            backoffSec = (backoffSec * 2).coerceAtMost(120)
+            val reason = lastCloseReason.ifEmpty { if (closedNormally) "连接被服务端关闭" else "网络异常" }
+            setStatus("连接断开（$reason），重连中…")
+            waitSec(if (closedNormally) 3 else backoffSec)
+            backoffSec = (backoffSec * 2).coerceAtMost(60)
             if (closedNormally) backoffSec = 5
         }
     }
@@ -133,17 +189,35 @@ class PushService : Service() {
             }
         }
 
-        val me = getJson("/api/auth/me") ?: return null
+        val me = getJson("/api/auth/me") ?: run {
+            lastCloseReason = "登录态读不到"
+            return null
+        }
         val userId = me.optJSONObject("account")?.optString("id").orEmpty()
-        if (userId.isEmpty()) return null
-        val online = getJson("/api/online/config") ?: return null
-        if (!online.optBoolean("configured")) return null
+        if (userId.isEmpty()) {
+            lastCloseReason = "未登录"
+            return null
+        }
+        val online = getJson("/api/online/config") ?: run {
+            lastCloseReason = "云配置读不到"
+            return null
+        }
+        if (!online.optBoolean("configured")) {
+            lastCloseReason = "云服务未配置"
+            return null
+        }
         val url = online.optString("supabaseUrl")
         val key = online.optString("anonKey")
-        if (url.isEmpty() || key.isEmpty()) return null
+        if (url.isEmpty() || key.isEmpty()) {
+            lastCloseReason = "云配置不完整"
+            return null
+        }
         registerShellSubscription(cookie, userId)
         PushConfig(url.trimEnd('/'), key, userId)
-    }.getOrNull()
+    }.getOrElse {
+        lastCloseReason = "请求站点失败"
+        null
+    }
 
     /**
      * 在站点注册一条合成推送订阅（endpoint = shell:<userId>）。
@@ -180,9 +254,15 @@ class PushService : Service() {
         val lock = Object()
         var normal = false
         var done = false
+        // 最后收到任何帧的时刻。Phoenix 心跳每 25 秒一次、服务端必回 phx_reply，
+        // 因此长时间没有任何帧 = 连接已经「假死」（TCP 还在但实际收不到东西）。
+        val lastActivity = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
 
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                lastConnectedAt = System.currentTimeMillis()
+                lastCloseReason = ""
+                setStatus("已连接，等待角色消息")
                 val join = JSONObject()
                     .put("topic", topic)
                     .put("event", "phx_join")
@@ -217,6 +297,7 @@ class PushService : Service() {
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                lastActivity.set(System.currentTimeMillis())
                 runCatching {
                     val msg = JSONObject(text)
                     if (msg.optString("event") != "broadcast") return
@@ -242,10 +323,17 @@ class PushService : Service() {
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 normal = true
+                lastCloseReason = "服务端关闭${if (code != 0) "（$code）" else ""}"
                 synchronized(lock) { done = true; lock.notifyAll() }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                val code = response?.code
+                lastCloseReason = when {
+                    code != null -> "连接失败（HTTP $code）"
+                    t.message != null -> t.message.orEmpty().take(40)
+                    else -> "网络异常"
+                }
                 synchronized(lock) { done = true; lock.notifyAll() }
             }
         }
@@ -254,6 +342,19 @@ class PushService : Service() {
             Request.Builder().url(wsUrl).build(),
             listener,
         )
+        // 假死检测：连接"看起来还活着"、却再也收不到任何帧（机场/路由器把长连接
+        // 掐成静默黑洞最常见）。超过 90 秒无帧就主动 cancel，让 onFailure 触发重连。
+        thread(name = "shell-push-watchdog") {
+            while (!done && !stopped) {
+                sleepSec(15)
+                if (done || stopped) break
+                if (System.currentTimeMillis() - lastActivity.get() > 90_000) {
+                    lastCloseReason = "连接假死，主动重连"
+                    runCatching { socket?.cancel() }
+                    synchronized(lock) { done = true; lock.notifyAll() }
+                }
+            }
+        }
         synchronized(lock) {
             while (!done && !stopped) runCatching { lock.wait(30_000) }
         }
@@ -464,5 +565,20 @@ class PushService : Service() {
 
     private fun sleepSec(sec: Long) {
         runCatching { Thread.sleep(sec * 1000) }
+    }
+
+    /**
+     * 可被打断的等待：网络恢复（或服务停止）时立刻醒来。
+     * 重连退避用它，避免「网已经回来了还要干等一分钟」。
+     */
+    private fun waitSec(sec: Long) {
+        val deadline = System.currentTimeMillis() + sec * 1000
+        synchronized(wakeLock) {
+            while (!stopped) {
+                val remain = deadline - System.currentTimeMillis()
+                if (remain <= 0) return
+                runCatching { wakeLock.wait(remain) }
+            }
+        }
     }
 }

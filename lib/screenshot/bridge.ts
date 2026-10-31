@@ -11,12 +11,22 @@
 // 非壳环境或老 APK 一律安全降级，调用方无需分支判断。
 
 import { ensureShellOverlayListener, subscribeShellOverlayEvents } from "../shell-call-overlay";
-import type { ScreenshotCapabilities, ScreenshotCaptureResult, ScreenshotDiagnostics } from "./types";
+import type {
+  ScreenTextRead,
+  ScreenshotCapabilities,
+  ScreenshotCaptureResult,
+  ScreenshotDiagnostics,
+} from "./types";
 
 type ScreenshotBridgeLike = {
   getScreenshotCapabilities?: () => string;
   captureScreenshot?: () => string;
   getScreenshotDiagnostics?: () => string;
+  readScreenText?: () => string;
+  showSubtitle?: (text: string, durationMs: number) => boolean;
+  hideSubtitle?: () => void;
+  startScreenTicker?: (seconds: number) => void;
+  stopScreenTicker?: () => void;
 };
 
 function bridge(): ScreenshotBridgeLike | null {
@@ -72,6 +82,70 @@ function parseAck(raw: unknown): CaptureAck {
   } catch {
     return { ok: false, reason: "截屏返回内容无法解析" };
   }
+}
+
+/** 读一次当前屏幕上的文字（不截图）。壳不支持或读不到返回 null。 */
+export function readScreenText(): ScreenTextRead | null {
+  try {
+    const raw = bridge()?.readScreenText?.();
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { available?: boolean; text?: string; package?: string; reason?: string };
+    if (!parsed || parsed.available !== true) return null;
+    const text = typeof parsed.text === "string" ? parsed.text : "";
+    if (!text) return null;
+    return { text, pkg: typeof parsed.package === "string" ? parsed.package : "" };
+  } catch {
+    return null;
+  }
+}
+
+/** 壳是否支持读屏幕文字。 */
+export function supportsScreenText(): boolean {
+  return typeof bridge()?.readScreenText === "function";
+}
+
+/** 在屏幕上弹一条字幕气泡。durationMs<=0 表示常驻。返回是否受理。 */
+export function showSubtitle(text: string, durationMs = 6000): boolean {
+  try {
+    return bridge()?.showSubtitle?.(text, durationMs) === true;
+  } catch {
+    return false;
+  }
+}
+
+/** 收起字幕气泡。 */
+export function hideSubtitle(): void {
+  try {
+    bridge()?.hideSubtitle?.();
+  } catch {
+    /* 忽略 */
+  }
+}
+
+/** 让原生按固定节拍往网页推 screen-tick（网页后台时 JS 定时器会被冻结）。 */
+export function startScreenTicker(seconds: number): boolean {
+  const b = bridge();
+  if (!b?.startScreenTicker) return false;
+  try {
+    b.startScreenTicker(seconds);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 停止原生看屏节拍。 */
+export function stopScreenTicker(): void {
+  try {
+    bridge()?.stopScreenTicker?.();
+  } catch {
+    /* 忽略 */
+  }
+}
+
+/** 壳是否支持原生看屏节拍。 */
+export function supportsScreenTicker(): boolean {
+  return typeof bridge()?.startScreenTicker === "function";
 }
 
 /**

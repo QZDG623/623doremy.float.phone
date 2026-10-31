@@ -233,6 +233,12 @@ export type PerceptionRuntimeState = {
   /** 上一次已报「打开应用」的包名与时刻，用于短冷却（避免同一应用反复弹）。 */
   lastWatchedOpenPkg: string;
   lastWatchedOpenAt: number;
+  /** 上次设备动作（walk / still / lying），空串 = 还没建立基准。状态变了才发信号。 */
+  lastMotionActivity: string;
+  /** 上次测得的环境噪音（分贝），-1 = 没有基准。用于「由安静变吵」只报一次。 */
+  lastNoiseDb: number;
+  /** 上次「在听」的标识（App + 标题）；空串 = 当时没在听。换歌才算变化。 */
+  lastNowPlayingKey: string;
 };
 
 const EMPTY_STATE: PerceptionRuntimeState = {
@@ -262,6 +268,9 @@ const EMPTY_STATE: PerceptionRuntimeState = {
   lastSleepEndAt: 0,
   lastWatchedOpenPkg: "",
   lastWatchedOpenAt: 0,
+  lastMotionActivity: "",
+  lastNoiseDb: -1,
+  lastNowPlayingKey: "",
 };
 
 export function loadPerceptionState(): PerceptionRuntimeState {
@@ -316,6 +325,12 @@ const EMPTY_STATUS: PerceptionStatusSnapshot = {
   // 旧缓存里没有这个字段（这次才加），合并后必须还是个数组——
   // 否则 describeTopUsage 遍历时会在 undefined 上炸。
   appUsage: [],
+  // 同理：旧缓存没有这四项，合并后必须是「读不到」的哨兵值，
+  // 不能让 undefined 一路漏进文案里变成「undefined 分贝」。
+  motion: null,
+  noiseDb: -1,
+  nowPlaying: null,
+  screenMinutes: -1,
 };
 
 /** 读最近一次采样的设备状态。从未采样过时 at 为空串。 */
