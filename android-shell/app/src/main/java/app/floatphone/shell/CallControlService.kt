@@ -20,6 +20,12 @@ import org.json.JSONObject
  */
 class CallControlService : AccessibilityService() {
 
+    /**
+     * 应用守卫：关注应用一打开就拉回小手机、睡眠时段锁住应用。
+     * 配置由网页写入，进程重启后仍然生效（见 AppGuard）。
+     */
+    private val appGuard by lazy { AppGuard(this) }
+
     companion object {
         @Volatile
         var connected: Boolean = false
@@ -43,6 +49,8 @@ class CallControlService : AccessibilityService() {
                 if (pkg.isEmpty()) return
                 // 只上报前台包名，供角色感知上下文；浮窗可见性由系统层级保证，无需重复处理。
                 ShellBus.dispatchOverlayEvent("foregroundApp", JSONObject().put("package", pkg))
+                // 原生守卫：这一步不经过网页，切到别的 App 后也能立刻拦截。
+                appGuard.onForeground(pkg)
             }
         }
     }

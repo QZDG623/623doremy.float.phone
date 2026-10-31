@@ -36,11 +36,14 @@ import {
   hasLocationPermission,
   hasStepPermission,
   readHealthCapabilities,
+  openHealthSettings,
   readLocationCapabilities,
   requestHealthPermission,
   requestLocationPermission,
   requestStepPermission,
 } from "@/lib/perception/bridge";
+import { syncAppGuardToNative } from "@/lib/perception/app-guard";
+import { openSystemSettings } from "@/lib/device-action/bridge";
 import { describeStatus, filterStatusBySwitches } from "@/lib/perception/describe";
 
 const CAP_ICONS: Record<PerceptionCapability, typeof Battery> = {
@@ -106,6 +109,8 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
     const next = { ...loadPerceptionConfig(), ...patch };
     savePerceptionConfig(next);
     setConfig(next);
+    // 总开关变化也要传导到原生守卫：关了感知就不该再拦应用。
+    syncAppGuardToNative(next);
     // 采样间隔 / 总开关变化会影响定时器，重建一次
     void restartPerception();
   }, []);
@@ -117,6 +122,54 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
     savePerceptionConfig(config);
     setConfig(config);
   }, []);
+
+  /**
+   * 只影响判定、不影响采样节奏的配置（关注应用、睡觉时间、睡眠锁）。
+   *
+   * 不重启引擎，但必须同步给原生——「一打开就拉回」的判断在无障碍服务里，
+   * 网页不写过去它就永远不会生效。
+   */
+  const updatePassive = useCallback((patch: Partial<PerceptionConfig>) => {
+    const next = { ...loadPerceptionConfig(), ...patch };
+    savePerceptionConfig(next);
+    setConfig(next);
+    syncAppGuardToNative(next);
+  }, []);
+
+  /** 能力行上的「去处理」：针对缺失的前置条件给出一步到位的操作。 */
+  const fixCapability = useCallback((id: PerceptionCapability) => {
+    if (id === "location") {
+      if (requestLocationPermission()) {
+        onNotice?.("位置权限已可用");
+      } else if (readLocationCapabilities().locationServiceOn === false) {
+        openSystemSettings("location");
+        onNotice?.("请在系统的定位开关里打开定位");
+      } else {
+        onNotice?.("请在系统弹窗里允许位置权限");
+      }
+      return;
+    }
+    if (id === "sleep") {
+      if (readHealthCapabilities().healthAvailable !== true) {
+        openHealthSettings();
+        onNotice?.("请先安装 Health Connect 并同步一次睡眠数据");
+      } else if (requestHealthPermission()) {
+        onNotice?.("睡眠读取已可用");
+      } else {
+        onNotice?.("请在 Health Connect 里允许「睡眠」读取");
+      }
+      return;
+    }
+    if (id === "foregroundApp") {
+      openSystemSettings("accessibility");
+      onNotice?.("请在小手机的「无障碍服务」里开启通话控制服务");
+      return;
+    }
+    if (id === "usageStats") {
+      openSystemSettings("usage_stats");
+      onNotice?.("请在系统设置里允许「使用情况访问」");
+    }
+  }, [onNotice]);
 
   const toggleCapability = useCallback((id: PerceptionCapability, on: boolean) => {
     const current = loadPerceptionConfig();
@@ -281,6 +334,16 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
                               <span className="per-tag" data-tone="warn">
                                 <AlertCircle size={10} strokeWidth={2.4} /> {row.missingRequirement}
                               </span>
+                            )}
+                            {row.missingRequirement && (row.id === "location" || row.id === "sleep" || row.id === "foregroundApp" || row.id === "usageStats") && (
+                              <button
+                                type="button"
+                                className="ui-btn ui-btn-outline"
+                                style={{ marginLeft: "auto", padding: "2px 8px", fontSize: 11 }}
+                                onClick={() => fixCapability(row.id)}
+                              >
+                                去处理
+                              </button>
                             )}
                           </div>
                         </div>
@@ -450,7 +513,7 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
 
               <div className="per-note" style={{ padding: "0 var(--ui-padding, 16px)" }}>
                 想让它变成真正的互动？去「现实桥」新建规则，匹配类型填上面的事件名
-                （如「电量偏低」「充电开始」「长时间使用」「应用用太久」「深夜还醒着」「很久没聊天」「久坐不动」），
+                （如「电量偏低」「充电开始」「打开应用」「使用应用」「应用用太久」「该睡觉了」「深夜还醒着」「很久没聊天」「久坐不动」），
                 就能让它写进聊天、记忆或通知。
               </div>
 
@@ -561,6 +624,215 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
                 <div className="per-note" style={{ padding: "0 var(--ui-padding, 16px)" }}>
                   「今天第一次打开」不用设置：当天第一次进小手机就会产生一条。
                   以上四条都是纯网页实现，不依赖安卓壳，也不需要额外权限。
+                </div>
+              </div>
+
+              {/* 关注应用：一打开就提醒 */}
+              <div>
+                <div className="settings-menu-section-title">一打开就提醒</div>
+                <div className="menu-group" style={{ marginTop: 10 }}>
+                  <div className="per-field" style={{ alignItems: "flex-start" }}>
+                    <div className="per-field-body">
+                      <div className="per-field-label">关注应用</div>
+                      <div className="per-field-hint">
+                        打开这些应用时立刻产生一条「打开应用」信号，不再等几十分钟。
+                        按显示名或包名「包含」匹配（不区分大小写），如 抖音 / 小红书 / com.tencent.tmgp
+                      </div>
+                      {config.appOpenWatchList.map((keyword, idx) => (
+                        <div key={idx} style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 8 }}>
+                          <input
+                            className="per-field-input"
+                            style={{ flex: 1, minWidth: 0 }}
+                            placeholder="应用名或包名，如 抖音"
+                            value={keyword}
+                            onChange={e => updatePassive({
+                              appOpenWatchList: config.appOpenWatchList.map((k, i) => i === idx ? e.target.value : k),
+                            })}
+                          />
+                          <button
+                            type="button"
+                            className="ui-btn ui-btn-soft-danger"
+                            onClick={() => updatePassive({
+                              appOpenWatchList: config.appOpenWatchList.filter((_, i) => i !== idx),
+                            })}
+                          >
+                            <Trash2 size={14} strokeWidth={2} />
+                          </button>
+                        </div>
+                      ))}
+                      <button
+                        type="button"
+                        className="ui-btn ui-btn-outline"
+                        style={{ marginTop: 8 }}
+                        onClick={() => updatePassive({ appOpenWatchList: [...config.appOpenWatchList, ""] })}
+                      >
+                        <Plus size={14} strokeWidth={2} /> 添加关注应用
+                      </button>
+                    </div>
+                  </div>
+                  <div className="per-field" style={{ alignItems: "center" }}>
+                    <div className="per-field-body">
+                      <div className="per-field-label">命中后拉回小手机</div>
+                      <div className="per-field-hint">
+                        检测到这些应用被打开时，直接把小手机切回前台。由安卓壳执行，需要开启无障碍服务
+                      </div>
+                    </div>
+                    <Toggle
+                      checked={config.appOpenReturnToFloat}
+                      onChange={(v: boolean) => updatePassive({ appOpenReturnToFloat: v })}
+                    />
+                  </div>
+                </div>
+                <div className="per-note" style={{ padding: "0 var(--ui-padding, 16px)" }}>
+                  「打开应用」信号会打断你当前正在做的事，建议只填真正想被拦的应用。
+                </div>
+              </div>
+
+              {/* 该睡觉了 */}
+              <div>
+                <div className="settings-menu-section-title">到点提醒睡觉</div>
+                <div className="menu-group" style={{ marginTop: 10 }}>
+                  <div className="per-field" style={{ alignItems: "center" }}>
+                    <div className="per-field-body">
+                      <div className="per-field-label">到点提醒</div>
+                      <div className="per-field-hint">
+                        到了设定时间产生一条「该睡觉了」（每天最多一条）。这条不受推送安静时段影响
+                      </div>
+                    </div>
+                    <Toggle
+                      checked={config.bedtimeHour >= 0}
+                      onChange={(v: boolean) => updatePassive({ bedtimeHour: v ? 23 : -1 })}
+                    />
+                  </div>
+                  {config.bedtimeHour >= 0 && (
+                    <div className="per-field">
+                      <div className="per-field-body">
+                        <div className="per-field-label">几点算该睡了</div>
+                        <div className="per-field-hint">到点后两小时内触发一次，不会天天在半夜反复叫</div>
+                      </div>
+                      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <input
+                          className="per-field-input"
+                          style={{ width: 64 }}
+                          type="number"
+                          min={0}
+                          max={23}
+                          value={config.bedtimeHour}
+                          onChange={e => updatePassive({ bedtimeHour: Math.min(23, Math.max(0, Number(e.target.value) || 0)) })}
+                        />
+                        <span style={{ opacity: 0.6 }}>:</span>
+                        <input
+                          className="per-field-input"
+                          style={{ width: 64 }}
+                          type="number"
+                          min={0}
+                          max={59}
+                          value={config.bedtimeMinute}
+                          onChange={e => updatePassive({ bedtimeMinute: Math.min(59, Math.max(0, Number(e.target.value) || 0)) })}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* 睡眠锁 */}
+              <div>
+                <div className="settings-menu-section-title">睡眠锁</div>
+                <div className="menu-group" style={{ marginTop: 10 }}>
+                  <div className="per-field" style={{ alignItems: "center" }}>
+                    <div className="per-field-body">
+                      <div className="per-field-label">到点锁定应用</div>
+                      <div className="per-field-hint">
+                        锁定时段内打开列表里的应用，会被原生全屏遮罩挡住，只留「回小手机」和「再用 5 分钟」
+                      </div>
+                    </div>
+                    <Toggle
+                      checked={config.sleepLockEnabled}
+                      onChange={(v: boolean) => updatePassive({ sleepLockEnabled: v })}
+                    />
+                  </div>
+                  {config.sleepLockEnabled && (
+                    <>
+                      <div className="per-field">
+                        <div className="per-field-body">
+                          <div className="per-field-label">锁定时段</div>
+                          <div className="per-field-hint">可以跨午夜，如 23:00 → 07:00</div>
+                        </div>
+                        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                          <input
+                            className="per-field-input"
+                            style={{ width: 96 }}
+                            type="time"
+                            value={config.sleepLockStart}
+                            onChange={e => updatePassive({ sleepLockStart: e.target.value || "23:00" })}
+                          />
+                          <span style={{ opacity: 0.6 }}>→</span>
+                          <input
+                            className="per-field-input"
+                            style={{ width: 96 }}
+                            type="time"
+                            value={config.sleepLockEnd}
+                            onChange={e => updatePassive({ sleepLockEnd: e.target.value || "07:00" })}
+                          />
+                        </div>
+                      </div>
+                      <div className="per-field" style={{ alignItems: "flex-start" }}>
+                        <div className="per-field-body">
+                          <div className="per-field-label">要锁的应用</div>
+                          <div className="per-field-hint">
+                            显示名或包名的包含匹配。留空 = 锁掉除小手机外的所有应用
+                          </div>
+                          {config.sleepLockApps.map((keyword, idx) => (
+                            <div key={idx} style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 8 }}>
+                              <input
+                                className="per-field-input"
+                                style={{ flex: 1, minWidth: 0 }}
+                                placeholder="应用名或包名，如 抖音"
+                                value={keyword}
+                                onChange={e => updatePassive({
+                                  sleepLockApps: config.sleepLockApps.map((k, i) => i === idx ? e.target.value : k),
+                                })}
+                              />
+                              <button
+                                type="button"
+                                className="ui-btn ui-btn-soft-danger"
+                                onClick={() => updatePassive({
+                                  sleepLockApps: config.sleepLockApps.filter((_, i) => i !== idx),
+                                })}
+                              >
+                                <Trash2 size={14} strokeWidth={2} />
+                              </button>
+                            </div>
+                          ))}
+                          <button
+                            type="button"
+                            className="ui-btn ui-btn-outline"
+                            style={{ marginTop: 8 }}
+                            onClick={() => updatePassive({ sleepLockApps: [...config.sleepLockApps, ""] })}
+                          >
+                            <Plus size={14} strokeWidth={2} /> 添加要锁的应用
+                          </button>
+                        </div>
+                      </div>
+                      <div className="per-field">
+                        <div className="per-field-body">
+                          <div className="per-field-label">遮罩上说什么</div>
+                          <div className="per-field-hint">这句话会显示在锁屏遮罩上</div>
+                        </div>
+                        <input
+                          className="per-field-input"
+                          style={{ width: 140 }}
+                          value={config.sleepLockMessage}
+                          onChange={e => updatePassive({ sleepLockMessage: e.target.value })}
+                        />
+                      </div>
+                    </>
+                  )}
+                </div>
+                <div className="per-note" style={{ padding: "0 var(--ui-padding, 16px)" }}>
+                  睡眠锁完全由安卓壳执行（无障碍遮罩），关掉小手机自己也照样生效；
+                  小手机自身永远不会被锁。
                 </div>
               </div>
 

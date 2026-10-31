@@ -60,7 +60,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         val SITE_URL: String = BuildConfig.SITE_URL
-        const val VERSION = "1.0.10"
+        const val VERSION = "1.0.35"
         /** 来电接听等场景的站内深链（必须以 SITE_URL 开头，否则忽略） */
         const val EXTRA_OPEN_URL = "open_url"
         /** 外部 App（如桌宠）唤起本壳用的自定义 scheme：floatshell://open?url=<站内地址> */
@@ -114,6 +114,9 @@ class MainActivity : AppCompatActivity() {
 
     /** 健康桥：让角色知道用户昨晚睡了多久（只读睡眠、只回时长，边界见 HealthBridge）。 */
     private val healthBridge by lazy { HealthBridge(this) }
+
+    /** 应用守卫：关注应用拉回小手机、睡眠时段锁应用（配置由网页写入，见 AppGuard）。 */
+    private val appGuard by lazy { AppGuard(this) }
 
     /**
      * 睡眠读取权限的申请结果回调。
@@ -649,9 +652,45 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun getAppLabel(packageName: String): String = perception.appLabel(packageName)
 
-        /** 本机支持哪些感知能力，给「感知 → 诊断」面板用。 */
+        /**
+         * 本机支持哪些感知能力，给「感知 → 诊断」面板用。
+         *
+         * 位置的实际授权状态在 LocationBridge：这里必须合并进来，否则网页读
+         * native.locationGranted 永远是 undefined，界面上会一直显示「需要位置权限」——
+         * 即使系统权限早就给了（实测反馈的正是这种「权限都有、却只有电量有反应」）。
+         */
         @JavascriptInterface
-        fun getPerceptionCapabilities(): String = perception.capabilitiesJson()
+        fun getPerceptionCapabilities(): String {
+            val base = runCatching { JSONObject(perception.capabilitiesJson()) }.getOrElse { JSONObject() }
+            val location = runCatching { JSONObject(locationBridge.capabilitiesJson()) }.getOrNull()
+            if (location != null) {
+                for (key in listOf("location", "locationGranted", "locationFineGranted", "locationServiceOn", "locationCached")) {
+                    if (location.has(key)) base.put(key, location.get(key))
+                }
+            }
+            base.put("appGuard", true)
+            return base.toString()
+        }
+
+        /**
+         * 写入应用守卫配置（关注应用 / 睡眠锁）。
+         * 配置落在 SharedPreferences，进程重启、网页没开时照样生效。
+         */
+        @JavascriptInterface
+        fun setAppGuardConfig(json: String) {
+            appGuard.saveConfig(json)
+        }
+
+        /** 读当前守卫配置（排障用）。 */
+        @JavascriptInterface
+        fun getAppGuardConfig(): String = appGuard.readConfig()
+
+        /** 把小手机自己拉到前台（应用守卫与睡眠遮罩的「回小手机」都走这条）。 */
+        @JavascriptInterface
+        fun bringToFront(): Boolean {
+            runOnUiThread { appGuard.bringToFront() }
+            return true
+        }
 
         /**
          * 读今天各应用的使用时长（JSON 数组，按时长降序）。

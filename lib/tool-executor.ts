@@ -23,7 +23,7 @@ import {
 } from "./tool-storage";
 import { executeCustomAppToolCall } from "./custom-app-tool-runtime";
 import { characterWorkspace, agentComputerRequest, isAgentComputerConfigured } from "./agent-computer";
-import { AGENT_COMPUTER_CAPABILITY_ID, CHECK_IN_REQUEST_CAPABILITY_ID, CALENDAR_MANAGEMENT_CAPABILITY_ID, DEVICE_ACTION_CAPABILITY_ID, LOCAL_DATA_LIBRARY_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MUSIC_CONTROL_CAPABILITY_ID, NOTE_WALL_CAPABILITY_ID, PERCEPTION_READ_CAPABILITY_ID, PHONE_WIDGET_CAPABILITY_ID, REALITY_BRIDGE_CAPABILITY_ID, SEND_FILE_CAPABILITY_ID, SYSTEM_CALENDAR_CAPABILITY_ID, TIMED_WAKE_CAPABILITY_ID, TOOLBOX_MANAGEMENT_CAPABILITY_ID, getInternalCapability } from "./internal-capability-storage";
+import { AGENT_COMPUTER_CAPABILITY_ID, CHECK_IN_REQUEST_CAPABILITY_ID, CALENDAR_MANAGEMENT_CAPABILITY_ID, DEVICE_ACTION_CAPABILITY_ID, LOCAL_DATA_LIBRARY_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MUSIC_CONTROL_CAPABILITY_ID, NOTE_WALL_CAPABILITY_ID, PERCEPTION_READ_CAPABILITY_ID, PHONE_WIDGET_CAPABILITY_ID, REALITY_BRIDGE_CAPABILITY_ID, SEND_FILE_CAPABILITY_ID, SYSTEM_CALENDAR_CAPABILITY_ID, TIMED_WAKE_CAPABILITY_ID, TOOLBOX_MANAGEMENT_CAPABILITY_ID, getInternalCapability, isInternalCapabilityAvailable } from "./internal-capability-storage";
 import {
     checkQueryCooldown,
     describeStatusByFocus,
@@ -962,11 +962,13 @@ async function executePhoneWidgetTool(call: ToolCall, context?: ToolExecutionCon
 /** 角色查看用户真实手机的系统日历（只读，且只读摘要字段）。 */
 async function executeSystemCalendarReadTool(call: ToolCall): Promise<ToolResult> {
     const capability = getInternalCapability(SYSTEM_CALENDAR_CAPABILITY_ID);
-    if (!capability || !capability.enabled || capability.mode === "off") {
+    if (!capability
+        || capability.mode === "off"
+        || (!capability.enabled && !isInternalCapabilityAvailable(SYSTEM_CALENDAR_CAPABILITY_ID))) {
         return {
             name: call.name,
             success: false,
-            error: "「系统日历」能力未启用（工具箱 → 内置能力）",
+            error: "「系统日历」能力未启用（设置 → 系统日历）",
             continueConversation: false,
             persistToHistory: false,
             userNotice: "系统日历能力未启用",
@@ -1018,11 +1020,13 @@ async function executeSystemCalendarReadTool(call: ToolCall): Promise<ToolResult
 /** 角色把一个重要日子写进用户系统日历。只新增，绝不改删用户已有安排。 */
 async function executeSystemCalendarWriteTool(call: ToolCall): Promise<ToolResult> {
     const capability = getInternalCapability(SYSTEM_CALENDAR_CAPABILITY_ID);
-    if (!capability || !capability.enabled || capability.mode === "off") {
+    if (!capability
+        || capability.mode === "off"
+        || (!capability.enabled && !isInternalCapabilityAvailable(SYSTEM_CALENDAR_CAPABILITY_ID))) {
         return {
             name: call.name,
             success: false,
-            error: "「系统日历」能力未启用（工具箱 → 内置能力）",
+            error: "「系统日历」能力未启用（设置 → 系统日历）",
             continueConversation: false,
             persistToHistory: false,
             userNotice: "系统日历能力未启用",
@@ -1184,11 +1188,13 @@ async function executePerceptionReadTool(call: ToolCall, context?: ToolExecution
  */
 async function executeDeviceActionTool(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {
     const capability = getInternalCapability(DEVICE_ACTION_CAPABILITY_ID);
-    if (!capability || !capability.enabled || capability.mode === "off") {
+    if (!capability
+        || capability.mode === "off"
+        || (!capability.enabled && !isInternalCapabilityAvailable(DEVICE_ACTION_CAPABILITY_ID))) {
         return {
             name: call.name,
             success: false,
-            error: "「操作手机设备」能力未启用（工具箱 → 内置能力）",
+            error: "「操作手机设备」能力未启用（设置 → 操作设备）",
             continueConversation: false,
             persistToHistory: false,
             userNotice: "操作手机设备能力未启用",
@@ -2408,10 +2414,46 @@ function executeCalendarAddTool(args: Record<string, unknown>, characterId: stri
     const plan = upsertCalendarScheduleItem("character", characterId, weekStart, parsed.item);
     const saved = plan.items.find(item => item.title === parsed.item.title && item.date === parsed.item.date && item.startTime === parsed.item.startTime);
     dispatchCalendarUpdated();
+
+    // 真实系统日历双写。
+    //
+    // 历史问题：这个工具只写 float 内置日历，用户在手机自带的日历里
+    // 看不到任何东西（也没有到点提醒），自然会觉得「角色说记了、其实没记」。
+    // 只要用户开了「设置 → 系统日历 → 写入日程」并给了权限，就顺手写一份到
+    // 真实的 CalendarContract；失败时只加一句备注，不影响内置日历的成功结果。
+    let nativeNote = "";
+    const systemConfig = loadSystemCalendarConfig();
+    if (systemConfig.writeEnabled) {
+        if (!hasCalendarBridge()) {
+            nativeNote = "（当前 App 版本不支持写系统日历）";
+        } else if (!hasCalendarWritePermission()) {
+            nativeNote = "（还没给日历写入权限，只记在了小手机里）";
+        } else {
+            const [year, month, day] = parsed.item.date.split("-").map(Number);
+            const [sh, sm] = parsed.item.startTime.split(":").map(Number);
+            const [eh, em] = parsed.item.endTime.split(":").map(Number);
+            const startMillis = new Date(year, month - 1, day, sh, sm).getTime();
+            const endMillis = new Date(year, month - 1, day, eh, em).getTime();
+            const result = insertSystemCalendarEvent({
+                title: parsed.item.title,
+                allDay: false,
+                year,
+                month,
+                day,
+                startMillis,
+                endMillis,
+                description: parsed.item.location && parsed.item.location !== "无" ? parsed.item.location : "",
+            });
+            nativeNote = result.ok
+                ? "，并已写进系统日历（到点系统会提醒）"
+                : `（系统日历写入失败：${result.reason}）`;
+        }
+    }
+
     return {
         name: "添加日程",
         success: true,
-        data: `日程添加成功：${formatCalendarItemSummary(saved ?? parsed.item)}`,
+        data: `日程添加成功：${formatCalendarItemSummary(saved ?? parsed.item)}${nativeNote}`,
         continueConversation: false,
         persistToHistory: false,
         userNotice: "已添加日程",

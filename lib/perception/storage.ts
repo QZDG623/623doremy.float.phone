@@ -59,6 +59,30 @@ function sanitizeOverrides(raw: unknown): AppUsageOverride[] {
   return list;
 }
 
+/** 清洗「关注应用 / 锁定应用」这类关键词列表。空项丢掉，最多 20 条。 */
+function sanitizeKeywords(raw: unknown, max = 20): string[] {
+  if (!Array.isArray(raw)) return [];
+  const list: string[] = [];
+  for (const item of raw) {
+    const text = String(item ?? "").trim();
+    if (!text) continue;
+    list.push(text.slice(0, 40));
+    if (list.length >= max) break;
+  }
+  return list;
+}
+
+/** 清洗 HH:MM 时间。不合法时退回 fallback（绝不把坏值喂给原生）。 */
+function sanitizeClock(raw: unknown, fallback: string): string {
+  const text = String(raw ?? "").trim();
+  const match = /^(\d{1,2}):(\d{2})$/.exec(text);
+  if (!match) return fallback;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return fallback;
+  return `${String(hour).padStart(2, "0")}:${match[2]}`;
+}
+
 /** 读配置。逐项做范围钳制，避免手改存储写出离谱的值。 */
 export function loadPerceptionConfig(): PerceptionConfig {
   try {
@@ -87,6 +111,17 @@ export function loadPerceptionConfig(): PerceptionConfig {
       injectStatus: parsed.injectStatus === true,
       queryCooldownMinutes: clamp(parsed.queryCooldownMinutes, PERCEPTION_LIMITS.queryCooldownMinutes.min, PERCEPTION_LIMITS.queryCooldownMinutes.max, PERCEPTION_DEFAULTS.queryCooldownMinutes),
       cloudSyncEnabled: parsed.cloudSyncEnabled === true,
+      appOpenWatchList: sanitizeKeywords(parsed.appOpenWatchList),
+      appOpenReturnToFloat: parsed.appOpenReturnToFloat !== false,
+      bedtimeHour: clamp(parsed.bedtimeHour, PERCEPTION_LIMITS.bedtimeHour.min, PERCEPTION_LIMITS.bedtimeHour.max, PERCEPTION_DEFAULTS.bedtimeHour),
+      bedtimeMinute: clamp(parsed.bedtimeMinute, PERCEPTION_LIMITS.bedtimeMinute.min, PERCEPTION_LIMITS.bedtimeMinute.max, PERCEPTION_DEFAULTS.bedtimeMinute),
+      sleepLockEnabled: parsed.sleepLockEnabled === true,
+      sleepLockStart: sanitizeClock(parsed.sleepLockStart, PERCEPTION_DEFAULTS.sleepLockStart),
+      sleepLockEnd: sanitizeClock(parsed.sleepLockEnd, PERCEPTION_DEFAULTS.sleepLockEnd),
+      sleepLockApps: sanitizeKeywords(parsed.sleepLockApps),
+      sleepLockMessage: typeof parsed.sleepLockMessage === "string" && parsed.sleepLockMessage.trim()
+        ? parsed.sleepLockMessage.trim().slice(0, 80)
+        : PERCEPTION_DEFAULTS.sleepLockMessage,
     };
   } catch {
     return { ...PERCEPTION_DEFAULTS };
@@ -195,6 +230,9 @@ export type PerceptionRuntimeState = {
   sitSteps: number;
   /** 本段久坐是否已上报。起身走动后重置，所以每段只报一次。 */
   sitReported: boolean;
+  /** 上一次已报「打开应用」的包名与时刻，用于短冷却（避免同一应用反复弹）。 */
+  lastWatchedOpenPkg: string;
+  lastWatchedOpenAt: number;
 };
 
 const EMPTY_STATE: PerceptionRuntimeState = {
@@ -222,6 +260,8 @@ const EMPTY_STATE: PerceptionRuntimeState = {
   lastLon: Number.NaN,
   lastPlace: "",
   lastSleepEndAt: 0,
+  lastWatchedOpenPkg: "",
+  lastWatchedOpenAt: 0,
 };
 
 export function loadPerceptionState(): PerceptionRuntimeState {

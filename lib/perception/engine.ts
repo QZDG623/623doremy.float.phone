@@ -22,6 +22,8 @@ import { isWithinPushQuietHours } from "../push-client";
 import { processBridgeItem } from "../reality-bridge/engine";
 import type { BridgeItem } from "../reality-bridge/types";
 import { ensureShellOverlayListener, subscribeShellOverlayEvents } from "../shell-call-overlay";
+import { sendShellNotification } from "../shell-notify";
+import { bringAppToFront, supportsAppGuard, syncAppGuardToNative } from "./app-guard";
 import {
   hasPerceptionBridge,
   readAppLabel,
@@ -107,7 +109,10 @@ async function emitSignal(
     return false;
   }
   // ② 安静时段
-  if (config.respectQuietHours && isWithinPushQuietHours(Date.now())) {
+  // 「该睡觉了」是用户主动设定的时间点，必须准点提醒——被安静时段吞掉
+  // 就完全失去意义（那正是夜里）。其余信号仍严格尊重安静时段。
+  const bypassQuietHours = signal.type === "该睡觉了";
+  if (!bypassQuietHours && config.respectQuietHours && isWithinPushQuietHours(Date.now())) {
     record("未投递", "处于安静时段");
     return false;
   }
@@ -386,6 +391,7 @@ async function checkAppUsageSignal(
 const DAILY_KEY_LATE_NIGHT = "lateNight";
 const DAILY_KEY_FIRST_OPEN = "firstOpen";
 const DAILY_KEY_NO_TALK = "noTalk";
+const DAILY_KEY_BEDTIME = "bedtime";
 
 /**
  * 深夜还醒着。
@@ -484,11 +490,43 @@ async function checkNoTalk(config: PerceptionConfig, state: PerceptionRuntimeSta
   if (delivered) state.dailySignalDate[DAILY_KEY_NO_TALK] = today;
 }
 
+/**
+ * 到点该睡觉了。
+ *
+ * 与「深夜还醒着」不同：这条是用户**主动设定的时间点**，语义是命令而不是观察，
+ * 所以要绕开安静时段（见 emitSignal 的 bypassQuietHours）。
+ * 只在到点后 2 小时内报一次：App 第二天下午才被打开时，不该补一句「该睡觉了」。
+ */
+async function checkBedtime(config: PerceptionConfig, state: PerceptionRuntimeState): Promise<void> {
+  if (config.bedtimeHour < 0) return;
+  const now = new Date();
+  const windowStart = now.getTime() - BEDTIME_WINDOW_MS;
+  const target = new Date(now);
+  target.setHours(config.bedtimeHour, config.bedtimeMinute, 0, 0);
+  if (target.getTime() > now.getTime()) return;
+  if (target.getTime() < windowStart) return;
+
+  const today = localDayKey();
+  if (state.dailySignalDate[DAILY_KEY_BEDTIME] === today) return;
+
+  const p2 = (n: number) => String(n).padStart(2, "0");
+  const delivered = await emitSignal({
+    capability: "lifeRhythm",
+    type: "该睡觉了",
+    payload: `已经 ${p2(config.bedtimeHour)}:${p2(config.bedtimeMinute)}，该睡觉了`,
+  }, state);
+  if (delivered) state.dailySignalDate[DAILY_KEY_BEDTIME] = today;
+}
+
+/** 「该睡觉了」的有效窗口：到点后这么久之内才提。 */
+const BEDTIME_WINDOW_MS = 2 * 60 * 60 * 1000;
+
 /** 三个「作息与习惯」信号的统一入口。 */
 async function checkLifeRhythm(config: PerceptionConfig, state: PerceptionRuntimeState): Promise<void> {
   await checkLateNight(config, state);
   await checkFirstOpenToday(state);
   await checkNoTalk(config, state);
+  await checkBedtime(config, state);
 }
 
 /**
@@ -662,15 +700,77 @@ async function checkWakeUp(
 /** 「刚醒」的有效窗口（小时）。超过就不提了。 */
 const WAKE_RECENT_HOURS = 6;
 
-/** 前台应用变化：只更新基准，不在这里上报（判断统一在 checkDwell）。 */
+/** 小手机自己的包名。守卫和锁都不能拦它，否则用户回不来。 */
+const SELF_PACKAGE = "app.floatphone.shell";
+
+/** 同一条「打开应用」信号的冷却：10 分钟内同一个应用只报一次，避免来回切屏刷屏。 */
+const WATCHED_OPEN_COOLDOWN_MS = 10 * 60 * 1000;
+
+/** 关键词是否命中某个应用（显示名或包名的包含匹配，不区分大小写）。 */
+function matchesAppKeywords(keywords: string[], pkg: string, label: string): boolean {
+  const labelLower = label.toLowerCase();
+  const pkgLower = pkg.toLowerCase();
+  return keywords.some(keyword => {
+    const key = keyword.trim().toLowerCase();
+    return key.length > 0 && (labelLower.includes(key) || pkgLower.includes(key));
+  });
+}
+
+/**
+ * 前台应用变化。
+ *
+ * 两件事一起做：
+ *   ① 更新「连续停留」基准（真正的判断在 checkDwell）；
+ *   ② 关注应用**一打开**就发一条「打开应用」信号——这正是用户要的
+ *      「刷就弹提醒」，而不是等到连续用满 20 分钟。
+ *
+ * 强行拉回小手机交给原生守卫（见 app-guard.ts）：网页在后台会被节流，
+ * 这里只在老壳/浏览器上做个兜底。
+ */
 function onForegroundApp(pkg: string): void {
   if (!pkg) return;
   const state = loadPerceptionState();
-  if (state.dwellPackage === pkg) return;
-  state.dwellPackage = pkg;
-  state.dwellSince = Date.now();
-  state.dwellReported = "";
+  const changed = state.dwellPackage !== pkg;
+  if (changed) {
+    state.dwellPackage = pkg;
+    state.dwellSince = Date.now();
+    state.dwellReported = "";
+    savePerceptionState(state);
+  }
+  if (!changed || pkg === SELF_PACKAGE) return;
+
+  const config = loadPerceptionConfig();
+  if (!config.enabled) return;
+  if (!isCapabilityEnabled(config, "foregroundApp")) return;
+  if (!config.appOpenWatchList.length) return;
+
+  const label = readAppLabel(pkg) || pkg;
+  if (!matchesAppKeywords(config.appOpenWatchList, pkg, label)) return;
+
+  const now = Date.now();
+  if (state.lastWatchedOpenPkg === pkg && now - state.lastWatchedOpenAt < WATCHED_OPEN_COOLDOWN_MS) return;
+  state.lastWatchedOpenPkg = pkg;
+  state.lastWatchedOpenAt = now;
   savePerceptionState(state);
+
+  // 原生通知：即使现实桥没配规则，用户也能立刻看到「角色发现了」。
+  // 通知失败（非壳环境）不影响后面的信号投递。
+  try {
+    sendShellNotification("角色注意到你了", `你打开了「${label}」`);
+  } catch {
+    /* 忽略 */
+  }
+  // 老壳没有原生守卫时兜底拉回小手机；新壳由原生在事件发生的瞬间处理，
+  // 这里再调一次只会让用户看到一次多余的切屏。
+  if (config.appOpenReturnToFloat && !supportsAppGuard()) {
+    bringAppToFront();
+  }
+
+  void emitSignal({
+    capability: "foregroundApp",
+    type: "打开应用",
+    payload: label,
+  }, state);
 }
 
 // ── 回到手机（回归信号）──
@@ -785,6 +885,9 @@ export async function startPerception(): Promise<void> {
   if (typeof window === "undefined") return;
   if (running) return;
   running = true;
+
+  // 把「关注应用 / 睡眠锁」配置写进原生：无障碍服务要脱离网页实时生效。
+  syncAppGuardToNative(loadPerceptionConfig());
 
   // 前台应用事件来自无障碍服务，经壳的 shell-call-overlay 通道过来。
   // 与通话浮窗共用同一条通道（ensureShellOverlayListener 幂等）。

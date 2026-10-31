@@ -151,6 +151,33 @@ export type PerceptionConfig = {
   queryCooldownMinutes: number;
   /** 是否把聚合后的设备快照同步到云端，供角色离线生成时参考。默认关。 */
   cloudSyncEnabled: boolean;
+  /**
+   * 「一打开就提醒」的关注应用列表（显示名或包名的包含匹配，不区分大小写）。
+   *
+   * 与 appUsageSignalOverrides 的区别：那张表看的是「用了多久」，
+   * 这张表看的是「一打开就发生」——用户要的往往正是后者（比如刷短视频
+   * 一进去就该被拦一下，而不是等到 20 分钟）。空数组 = 关闭这个能力。
+   */
+  appOpenWatchList: string[];
+  /** 命中关注应用时，是否顺手把用户拉回小手机（需要安卓壳，默认开）。 */
+  appOpenReturnToFloat: boolean;
+  /**
+   * 几点该睡觉：到点产生一条「该睡觉了」（每天最多一条）。-1 = 关。
+   * 与深夜信号的差别：这条是用户主动设定的时间点，不受安静时段影响
+   * （见引擎里的 emitSignal 特例）。
+   */
+  bedtimeHour: number;
+  bedtimeMinute: number;
+  /** 睡眠锁：到点后打开异常应用会被原生全屏遮罩挡住，逼 TA 去睡觉。 */
+  sleepLockEnabled: boolean;
+  /** 锁定时段起点 HH:MM（可跨午夜，如 22:30 → 07:00）。 */
+  sleepLockStart: string;
+  /** 锁定时段终点 HH:MM。 */
+  sleepLockEnd: string;
+  /** 要锁的应用（显示名或包名的包含匹配）。空数组 = 除小手机自身外的所有应用。 */
+  sleepLockApps: string[];
+  /** 遮罩上的那句话。 */
+  sleepLockMessage: string;
 };
 
 export const PERCEPTION_DEFAULTS: PerceptionConfig = {
@@ -173,6 +200,15 @@ export const PERCEPTION_DEFAULTS: PerceptionConfig = {
   injectStatus: false,
   queryCooldownMinutes: 5,
   cloudSyncEnabled: false,
+  appOpenWatchList: [],
+  appOpenReturnToFloat: true,
+  bedtimeHour: -1,
+  bedtimeMinute: 0,
+  sleepLockEnabled: false,
+  sleepLockStart: "23:00",
+  sleepLockEnd: "07:00",
+  sleepLockApps: [],
+  sleepLockMessage: "该睡觉啦，把手机放下，明天再玩。",
 };
 
 export const PERCEPTION_LIMITS = {
@@ -190,6 +226,8 @@ export const PERCEPTION_LIMITS = {
   noTalkHours: { min: 0, max: 336 },
   sitStillMinutes: { min: 0, max: 720 },
   queryCooldownMinutes: { min: 0, max: 720 },
+  bedtimeHour: { min: -1, max: 23 },
+  bedtimeMinute: { min: 0, max: 59 },
 } as const;
 
 /** 一条待投递的感知信号。type 直接写成人类可读的事件名，规则里 matchType 就能匹配。 */

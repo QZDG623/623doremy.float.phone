@@ -14,6 +14,7 @@ import {
   readSleep,
   readUsageStats,
 } from "./bridge";
+import { hasCalendarReadPermission } from "../system-calendar";
 import { isPerceptionRunning } from "./engine";
 import { isCapabilityEnabled, loadPerceptionConfig, loadPerceptionState, loadPerceptionStatus } from "./storage";
 import {
@@ -133,6 +134,10 @@ export function buildCapabilityRows(): CapabilityRow[] {
       } else if (native.locationServiceOn !== true) {
         missingRequirement = "系统定位开关没开";
       }
+    }
+    // 系统日历：能力已接通，但读取权限没给就读不到日程。
+    if (id === "calendar" && nativeSupported && !hasCalendarReadPermission()) {
+      missingRequirement = "需要读取系统日历权限";
     }
     // 睡眠：三层前置，逐个报清楚，否则用户只会看到「开了却没反应」。
     // 顺序按可操作性排：先装（没装就得去装），再授权。

@@ -336,7 +336,10 @@ class PerceptionBridge(private val context: Context) {
         // 位置已接通（见 LocationBridge）：能读就报能读，授权态另报——
         // 混为一谈会让用户以为手机不支持、从而放弃授权。
         .put("location", true)
-        .put("calendar", false)
+        // 系统日历已接通（见 CalendarBridge）：能力上报 true，读/写授权状态
+        // 由 getCalendarCapabilities() 单独回答。以前写死 false，导致设置页
+        // 一直显示「当前版本不支持」，用户自然会觉得日历功能坏了。
+        .put("calendar", true)
         .put("contacts", false)
         // usageStats 现在是真接通了（见 usageStatsJson）：能读就报能读。
         // 注意区分「支持」与「已授权」——授权状态走 hasUsageStatsAccess()，

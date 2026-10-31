@@ -1,7 +1,9 @@
 import type { InternalCapabilityConfig } from "./settings-types";
 import { isAgentComputerConfigured, isContainerComputer } from "./agent-computer";
+import { loadDeviceActionConfig } from "./device-action/storage";
 import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 import { loadBridgeDataItems, loadBridgeShortcutActions, parseBridgeActionParameterSchema } from "./reality-bridge/storage";
+import { loadSystemCalendarConfig } from "./system-calendar/config";
 
 const INTERNAL_CAPABILITIES_KEY = "ai_phone_internal_capabilities_v1";
 registerKvMigration(INTERNAL_CAPABILITIES_KEY);
@@ -1425,10 +1427,41 @@ export function getInternalCapability(id: string): InternalCapabilityConfig | nu
     return loadInternalCapabilities().find(item => item.id === id) || null;
 }
 
+/**
+ * 某个内置能力是否「事实上可用」。
+ *
+ * 存在的原因：设置页把它们拆成了两处开关——
+ *   · 工具箱 → 内置能力（这里存的是 enabled）
+ *   · 设置 → 操作设备 / 系统日历（那边才是用户真正的意图开关）
+ * 用户只打开了后者、没去工具箱里再打开一次时，模型完全看不到工具说明，
+ * 于是它只能「假装做了」——实测反馈的正是这种「角色说做了、手机没变化」。
+ * 所以只要功能侧的开关打开，就视为能力可用；执行器的门控也必须认这条，
+ * 否则会出现「工具注入进来了、一调用却被拒」的另一半 bug。
+ */
+export function isInternalCapabilityAvailable(id: string): boolean {
+    if (id === DEVICE_ACTION_CAPABILITY_ID) {
+        try {
+            return loadDeviceActionConfig().enabled;
+        } catch {
+            return false;
+        }
+    }
+    if (id === SYSTEM_CALENDAR_CAPABILITY_ID) {
+        try {
+            const config = loadSystemCalendarConfig();
+            return config.readEnabled || config.writeEnabled;
+        } catch {
+            return false;
+        }
+    }
+    return false;
+}
+
 export function getEnabledInternalCapabilities(appId?: string): InternalCapabilityConfig[] {
     if (appId !== "chat" && appId !== "group_chat") return [];
     return loadInternalCapabilities().filter(item => {
-        if (!item.enabled || item.mode === "off") return false;
+        if (item.mode === "off") return false;
+        if (!item.enabled && !isInternalCapabilityAvailable(item.id)) return false;
         // 角色电脑是可插拔模块：没连接就不注入，模型完全看不见
         if (item.id === AGENT_COMPUTER_CAPABILITY_ID && !isAgentComputerConfigured()) return false;
         return true;
