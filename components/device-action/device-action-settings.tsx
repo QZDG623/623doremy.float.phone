@@ -201,7 +201,8 @@ export function DeviceActionSettings({ onNotice }: { onNotice?: (msg: string) =>
             })}
           </div>
           <div className="per-note" style={{ padding: "0 var(--ui-padding, 16px)" }}>
-            角色要做这些动作，还要单独开能力：工具箱 → 内置能力 → 「操作手机设备」。
+            这里打开总开关并开启某个动作，角色就能真的做——不需要再去工具箱里另开一次。
+            工具箱 → 内置能力 → 「操作手机设备」仍可当总闸；但在那里选「关闭」时，这里开了也不会生效。
           </div>
         </div>
 
