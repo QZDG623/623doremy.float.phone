@@ -29,7 +29,10 @@
 // v28：识别方案可与合成方案分开；Fish 识别额度不足时报可操作的中文提示。
 // v29：视频通话支持自定义角色形象（闭嘴/张嘴/闭眼差分图），说话张嘴 + 随机眨眼。
 // v30：张嘴节奏放慢到正常语速，且只在真正播放语音时才切换。
-const CACHE_VERSION = "ai-phone-pwa-v30";
+// v31：新增「关注应用一打开就拉回小手机」与「睡眠锁」设置，并修好操作设备/
+//      系统日历的开关门控（以前工具箱同名能力默认关闭，角色拿不到工具说明，
+//      于是只说「做了」）。升版让设备丢掉旧 JS，拉取带新设置页的构建。
+const CACHE_VERSION = "ai-phone-pwa-v31";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 
