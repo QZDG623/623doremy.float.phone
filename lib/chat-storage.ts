@@ -1239,6 +1239,20 @@ function refreshSessionPreviewMetadata(sessions: ChatSession[]): NormalizedList<
     return { items, changed };
 }
 
+/** 本地聊天库读取失败（通常是 IndexedDB 被系统逐出/占用）。界面必须显式提示，不能静默空库。 */
+export const CHAT_STORAGE_HYDRATION_FAILED_EVENT = "ai-phone-chat-hydration-failed";
+/** 主表为空但成功从每日快照恢复（一般意味着上次是异常退出）。 */
+export const CHAT_STORAGE_RESTORED_EVENT = "ai-phone-chat-restored";
+
+function notifyChatStorageEvent(name: string, detail?: unknown): void {
+    if (typeof window === "undefined") return;
+    try {
+        window.dispatchEvent(new CustomEvent(name, { detail }));
+    } catch {
+        // 事件派发失败不该影响数据层
+    }
+}
+
 /**
  * Hydrate in-memory caches from IndexedDB. Must be awaited once at app startup
  * before any chat data is accessed. Concurrent calls share the same promise;
@@ -1263,9 +1277,20 @@ export function hydrateChatStorage(): Promise<void> {
         if (normalizedContacts.changed) dbReplaceContacts(normalizedContacts.items);
         if (normalizedSessions.changed || redirectedMessages > 0 || refreshedSessions.changed) dbReplaceSessions(refreshedSessions.items);
         _hydrated = true;
+        if (data.recoveredFromSnapshot) {
+            notifyChatStorageEvent(CHAT_STORAGE_RESTORED_EVENT, {
+                snapshotAt: data.snapshotAt,
+                uncleanExit: data.uncleanExit,
+                messages: data.messages.length,
+                sessions: data.sessions.length,
+            });
+        }
     }).catch(err => {
         console.warn("[ChatStorage] hydration failed, will retry on next call:", err);
         _hydratePromise = null;
+        notifyChatStorageEvent(CHAT_STORAGE_HYDRATION_FAILED_EVENT, {
+            message: err instanceof Error ? err.message : String(err),
+        });
     });
     return _hydratePromise;
 }

@@ -32,7 +32,8 @@
 // v31：新增「关注应用一打开就拉回小手机」与「睡眠锁」设置，并修好操作设备/
 //      系统日历的开关门控（以前工具箱同名能力默认关闭，角色拿不到工具说明，
 //      于是只说「做了」）。升版让设备丢掉旧 JS，拉取带新设置页的构建。
-const CACHE_VERSION = "ai-phone-pwa-v31";
+// v32：本地聊天库加每日快照 + 异常退出检测，输入框拆出 memo 组件（打字不再整页重渲染）。
+const CACHE_VERSION = "ai-phone-pwa-v32";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 
