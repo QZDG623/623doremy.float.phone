@@ -484,7 +484,9 @@ class MainActivity : AppCompatActivity() {
      * 执行，正好可以安全地操作 WebView。
      */
     private fun handleBackPress() {
-        if (rendererCrashed || webView.isDestroyed) { fallbackBack(); return }
+        // WebView 没有 isDestroyed 接口；渲染进程崩溃后本实例随即被 recreate，
+        // 这里只靠 rendererCrashed 标记拦住（崩溃后继续 evaluateJavascript 只会空转）。
+        if (rendererCrashed) { fallbackBack(); return }
         if (backHandling) { fallbackBack(); return }
         backHandling = true
         runCatching {
@@ -504,7 +506,7 @@ class MainActivity : AppCompatActivity() {
 
     /** 网页没有消化这一下返回：先回历史，没有历史就退到系统桌面。 */
     private fun fallbackBack() {
-        if (!rendererCrashed && !webView.isDestroyed && webView.canGoBack()) webView.goBack()
+        if (!rendererCrashed && webView.canGoBack()) webView.goBack()
         else moveTaskToBack(true)
     }
 

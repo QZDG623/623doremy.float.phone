@@ -1,7 +1,6 @@
 package app.floatphone.shell
 
 import android.accessibilityservice.AccessibilityService
-import android.accessibilityservice.AccessibilityNodeInfo
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -15,6 +14,7 @@ import android.util.TypedValue
 import android.view.Display
 import android.view.Gravity
 import android.view.WindowManager
+import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.TextView
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
