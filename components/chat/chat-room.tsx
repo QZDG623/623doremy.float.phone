@@ -5193,8 +5193,9 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 mediaUrl: m.mediaUrl,
                 createdAt: m.createdAt,
             }).then(result => {
-                if (result.status === "exists") showChatToast("这条已经在收藏夹里了");
-                else if (result.playable) showChatToast("已收藏这条语音，可在收藏夹里重复播放");
+                if (result.status === "exists") {
+                    showChatToast(result.playable ? "这条已经在收藏夹里了" : "这条已收藏，但音频合成失败");
+                } else if (result.playable) showChatToast("已收藏这条语音，可在收藏夹里重复播放");
                 else showChatToast("已收藏语音文字，但音频合成失败");
             }).catch(() => showChatToast("收藏语音失败，请稍后再试"));
             return;
