@@ -7,6 +7,7 @@ import {
     DEFAULT_IMAGE_GENERATION_SETTINGS,
     DEFAULT_NOVELAI_PRESET,
     loadImageGenerationSettings,
+    loadUserIdentities,
     saveImageGenerationSettings,
 } from "@/lib/settings-storage";
 import { loadCharacters } from "@/lib/character-storage";
@@ -66,7 +67,10 @@ type Status = { success: boolean; message: string };
 export function ImageGenerationSettings() {
     const [settings, setSettings] = useState<ImageGenerationSettingsType>(DEFAULT_IMAGE_GENERATION_SETTINGS);
     const [characters, setCharacters] = useState<Character[]>([]);
+    const [userIdentities, setUserIdentities] = useState<ReturnType<typeof loadUserIdentities>>([]);
     const [referencePreviews, setReferencePreviews] = useState<Record<string, string>>({});
+    const [userPreviews, setUserPreviews] = useState<Record<string, string>>({});
+    const [anchorPreviews, setAnchorPreviews] = useState<Record<string, string>>({});
     const [selectedCharacterId, setSelectedCharacterId] = useState<string | null>(null);
     const [cropCharacterId, setCropCharacterId] = useState<string | null>(null);
     const [cropDraft, setCropDraft] = useState({ x: 0.27, y: 0.12, size: 0.46 });
@@ -143,6 +147,7 @@ export function ImageGenerationSettings() {
         const loadedCharacters = loadCharacters();
         setCharacters(loadedCharacters);
         setSelectedCharacterId(loadedCharacters[0]?.id || null);
+        setUserIdentities(loadUserIdentities());
     }, []);
 
     useEffect(() => {
@@ -163,10 +168,38 @@ export function ImageGenerationSettings() {
     }, [settings.characterReferences]);
 
     useEffect(() => {
-        return () => {
-            if (testPreviewUrl) URL.revokeObjectURL(testPreviewUrl);
-        };
-    }, [testPreviewUrl]);
+        let cancelled = false;
+        const refs = settings.userReferences || {};
+        Promise.all(Object.entries(refs).map(async ([userId, ref]) => {
+            const dataUrl = ref.assetId ? await getChatImageFromIndexedDB(ref.assetId) : null;
+            return [userId, dataUrl] as const;
+        })).then(entries => {
+            if (cancelled) return;
+            const next: Record<string, string> = {};
+            for (const [userId, dataUrl] of entries) {
+                if (dataUrl) next[userId] = dataUrl;
+            }
+            setUserPreviews(next);
+        });
+        return () => { cancelled = true; };
+    }, [settings.userReferences]);
+
+    useEffect(() => {
+        let cancelled = false;
+        const anchors = Object.values(settings.characterReferences || {}).flatMap(ref => ref.anchors || []);
+        Promise.all(anchors.map(async anchor => {
+            const dataUrl = anchor.assetId ? await getChatImageFromIndexedDB(anchor.assetId) : null;
+            return [anchor.id, dataUrl] as const;
+        })).then(entries => {
+            if (cancelled) return;
+            const next: Record<string, string> = {};
+            for (const [anchorId, dataUrl] of entries) {
+                if (dataUrl) next[anchorId] = dataUrl;
+            }
+            setAnchorPreviews(next);
+        });
+        return () => { cancelled = true; };
+    }, [settings.characterReferences]);
 
     const syncCharacterScrollMetrics = useCallback(() => {
         const list = characterListRef.current;
@@ -395,6 +428,61 @@ export function ImageGenerationSettings() {
                     updatedAt: Date.now(),
                 },
             },
+        });
+    };
+
+    const updateUserReference = (userId: string, patch: Partial<NonNullable<ImageGenerationSettingsType["userReferences"]>[string]>) => {
+        const current = settings.userReferences?.[userId];
+        persist({
+            ...settings,
+            userReferences: {
+                ...(settings.userReferences || {}),
+                [userId]: {
+                    ...current,
+                    ...patch,
+                    updatedAt: Date.now(),
+                },
+            },
+        });
+    };
+
+    const uploadUserReference = async (userId: string, file: File) => {
+        const assetId = await saveChatImageToIndexedDB(file);
+        updateUserReference(userId, { assetId, enabled: true });
+    };
+
+    const chooseImageFile = (onPick: (file: File) => void | Promise<void>) => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = "image/*";
+        input.onchange = async () => {
+            const file = input.files?.[0];
+            if (file) await onPick(file);
+        };
+        input.click();
+    };
+
+    const addAnchor = (characterId: string) => {
+        const current = settings.characterReferences?.[characterId];
+        updateCharacterReference(characterId, {
+            anchors: [
+                ...(current?.anchors || []),
+                { id: `anchor_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, label: "", description: "", enabled: true },
+            ],
+        });
+    };
+
+    const updateAnchor = (characterId: string, anchorId: string, patch: Partial<NonNullable<ImageGenerationSettingsType["characterReferences"][string]["anchors"]>[number]>) => {
+        const current = settings.characterReferences?.[characterId];
+        updateCharacterReference(characterId, {
+            anchors: (current?.anchors || []).map(anchor => anchor.id === anchorId ? { ...anchor, ...patch } : anchor),
+        });
+    };
+
+    const removeAnchor = (characterId: string, anchorId: string) => {
+        const current = settings.characterReferences?.[characterId];
+        updateCharacterReference(characterId, {
+            anchors: (current?.anchors || []).filter(anchor => anchor.id !== anchorId),
         });
     };
 
@@ -1013,6 +1101,59 @@ export function ImageGenerationSettings() {
             </div>
 
             <div className="flex flex-col gap-2">
+                <p className="settings-menu-section-title">User Identity Reference</p>
+                <div className="menu-group p-4 flex flex-col gap-3">
+                    <div className="flex flex-col gap-1">
+                        <label className="menu-label">用户参考图</label>
+                        <span className="menu-desc">角色生成合照、用户照片或共同自拍时，会按角色当前绑定的用户身份自动读取对应参考图。</span>
+                        {settings.provider === "novelai" && (
+                            <span className="menu-desc opacity-60">当前为 NovelAI 引擎，暂不读取参考图；切换为 OpenAI 兼容引擎后生效。</span>
+                        )}
+                    </div>
+                    {userIdentities.length === 0 ? (
+                        <div className="ui-empty py-6">
+                            <Camera size={22} />
+                            <span className="menu-desc">暂无用户身份，请先在设置里创建。</span>
+                        </div>
+                    ) : userIdentities.map(identity => {
+                        const preview = userPreviews[identity.id];
+                        const ref = settings.userReferences?.[identity.id];
+                        return (
+                            <div key={identity.id} className="rounded-2xl bg-[var(--c-input)] p-3">
+                                <div className="flex items-center gap-3">
+                                    <span className="h-11 w-11 shrink-0 overflow-hidden rounded-full bg-[var(--c-card-bg)]">
+                                        {preview ? (
+                                            <img src={preview} alt="" className="h-full w-full object-cover" />
+                                        ) : identity.avatarUrl ? (
+                                            <img src={identity.avatarUrl} alt="" className="h-full w-full object-cover" />
+                                        ) : (
+                                            <span className="flex h-full w-full items-center justify-center ts-13 font-semibold text-[var(--c-icon)]">{identity.name.slice(0, 1)}</span>
+                                        )}
+                                    </span>
+                                    <span className="min-w-0 flex flex-1 flex-col">
+                                        <span className="menu-label truncate">{identity.name}</span>
+                                        <span className="menu-desc truncate">{preview ? (ref?.enabled === false ? "参考图已关闭" : "参考图已启用") : "未上传独立参考图"}</span>
+                                    </span>
+                                </div>
+                                <div className="mt-2 flex gap-2">
+                                    <button type="button" className="ui-btn ui-btn-soft-action flex-1" onClick={() => chooseImageFile(file => uploadUserReference(identity.id, file))}>
+                                        <Upload size={16} />
+                                        {preview ? "更换参考图" : "上传参考图"}
+                                    </button>
+                                    {preview && (
+                                        <button type="button" className={`ui-btn shrink-0 ${ref?.enabled === false ? "ui-btn-primary" : "ui-btn-outline"}`} onClick={() => updateUserReference(identity.id, { enabled: ref?.enabled === false })}>
+                                            <Power size={16} />
+                                            {ref?.enabled === false ? "启用" : "关闭"}
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+
+            <div className="flex flex-col gap-2">
                 <p className="settings-menu-section-title">Character Identity</p>
                 {settings.provider === "novelai" && (
                     <Alert variant="info">
@@ -1156,6 +1297,60 @@ export function ImageGenerationSettings() {
                                 )}
                             </div>
                         )}
+
+                        <div className="border-t border-[var(--c-card-border)] pt-3">
+                            <div className="flex items-center justify-between gap-3">
+                                <div className="min-w-0">
+                                    <div className="menu-label">特定锚点</div>
+                                    <div className="menu-desc">为角色固定重要配饰、衣物或外貌特征；图片与说明会一起用于生图。</div>
+                                </div>
+                                <button type="button" className="ui-btn ui-btn-outline shrink-0" onClick={() => addAnchor(selectedCharacter.id)}>
+                                    <Plus size={16} />
+                                    增加
+                                </button>
+                            </div>
+                            {(selectedReference?.anchors || []).length === 0 ? (
+                                <div className="mt-2 rounded-xl bg-[var(--c-input)] px-3 py-3 text-center menu-desc">暂未添加锚点</div>
+                            ) : (
+                                <div className="mt-2 flex flex-col gap-2">
+                                    {(selectedReference?.anchors || []).map(anchor => (
+                                        <div key={anchor.id} className="rounded-xl bg-[var(--c-input)] p-3">
+                                            <div className="flex items-center gap-2">
+                                                <button
+                                                    type="button"
+                                                    className="h-12 w-12 shrink-0 overflow-hidden rounded-lg bg-[var(--c-card-bg)]"
+                                                    onClick={() => chooseImageFile(async file => {
+                                                        const assetId = await saveChatImageToIndexedDB(file);
+                                                        updateAnchor(selectedCharacter.id, anchor.id, { assetId });
+                                                    })}
+                                                >
+                                                    {anchorPreviews[anchor.id] ? (
+                                                        <img src={anchorPreviews[anchor.id]} alt="" className="h-full w-full object-cover" />
+                                                    ) : (
+                                                        <span className="flex h-full w-full items-center justify-center menu-desc"><Image size={16} /></span>
+                                                    )}
+                                                </button>
+                                                <div className="min-w-0 flex flex-1 flex-col gap-1">
+                                                    <Input
+                                                        value={anchor.label}
+                                                        onChange={event => updateAnchor(selectedCharacter.id, anchor.id, { label: event.target.value })}
+                                                        placeholder="锚点名称，例如：红色围巾"
+                                                    />
+                                                    <Input
+                                                        value={anchor.description || ""}
+                                                        onChange={event => updateAnchor(selectedCharacter.id, anchor.id, { description: event.target.value })}
+                                                        placeholder="补充说明（可选）"
+                                                    />
+                                                </div>
+                                                <button type="button" className="ui-btn ui-btn-ghost shrink-0 p-2" aria-label="删除锚点" onClick={() => removeAnchor(selectedCharacter.id, anchor.id)}>
+                                                    <Trash2 size={16} />
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
                     </div>
                 )}
             </div>

@@ -610,6 +610,7 @@ export function ChatSettingsPanel({
     const userIdentity = resolveUserIdentity(session.isGroup ? undefined : session.contactId, session.isGroup ? "group_chat" : "chat");
     const effectiveUserAvatar = resolveChatUserAvatar(session, userIdentity?.avatarUrl);
     const [notifyAvatarChange, setNotifyAvatarChange] = useState(session.notifyCharacterOnUserAvatarChange !== false);
+    const [allowAvatarFromChat, setAllowAvatarFromChat] = useState(session.allowCharacterAvatarFromChat !== false);
 
     const updateOwnAvatar = async (file: File) => {
         const avatarUrl = await fileToAvatarDataUrl(file);
@@ -1311,6 +1312,21 @@ export function ChatSettingsPanel({
 
                 {/* Toggles */}
                 <div className="menu-group">
+                    {!session.isGroup && (
+                        <div className="menu-item">
+                            <ChatInfoIcon icon={Sparkles} color={BINDING_ACCENTS.preset} />
+                            <div className="menu-label-group">
+                                <span className="menu-label">允许强制开启线下剧情</span>
+                                <span className="menu-desc">角色非常渴望见面、准备惊喜或主动推进见面时，可直接创建衔接记忆分线并进入剧情</span>
+                            </div>
+                            <div className="menu-right">
+                                <Toggle
+                                    checked={session.allowForcedOfflineStory !== false}
+                                    onChange={c => updateSession({ allowForcedOfflineStory: c })}
+                                />
+                            </div>
+                        </div>
+                    )}
                     <div className="menu-item">
                         <ChatInfoIcon icon={Pin} color={BINDING_ACCENTS.preset} />
                         <div className="menu-label-group"><span className="menu-label">置顶聊天</span></div>
@@ -2119,12 +2135,19 @@ export function ChatSettingsPanel({
                         )}
                         <div className="mt-2 flex items-center gap-2 rounded-xl bg-[var(--c-card-bg)] px-3 py-2">
                             <div className="min-w-0 flex-1">
+                                <div className="ts-12 font-medium text-[var(--c-text-title)]">聊天中允许角色自主换头像</div>
+                                <div className="mt-0.5 ts-10 opacity-55">你发图并说“当头像使用”时，角色会按要求换上这张图</div>
+                            </div>
+                            <Toggle checked={allowAvatarFromChat} onChange={checked => { setAllowAvatarFromChat(checked); updateSession({ allowCharacterAvatarFromChat: checked }); }} />
+                        </div>
+                        <div className="mt-2 flex items-center gap-2 rounded-xl bg-[var(--c-card-bg)] px-3 py-2">
+                            <div className="min-w-0 flex-1">
                                 <div className="ts-12 font-medium text-[var(--c-text-title)]">我更换头像后希望对方做出反应</div>
                                 <div className="mt-0.5 ts-10 opacity-55">开启后写入短期记忆并立即通知对方</div>
                             </div>
                             <Toggle checked={notifyAvatarChange} onChange={checked => { setNotifyAvatarChange(checked); updateSession({ notifyCharacterOnUserAvatarChange: checked }); }} />
                         </div>
-                        <p className="mt-2 px-1 ts-10 leading-4 opacity-50">聊天中发送图片并暗示对方换头像时，角色仍会按人设自行决定。</p>
+                        <p className="mt-2 px-1 ts-10 leading-4 opacity-50">聊天中发送图片并说“当头像使用”时，角色会主动把图片换成自己的头像；关闭上面的开关可停用。</p>
                         <input ref={ownAvatarInputRef} type="file" accept="image/*" className="hidden" onChange={event => void handleAvatarInput(event, "own")} />
                         <input ref={characterAvatarInputRef} type="file" accept="image/*" className="hidden" onChange={event => void handleAvatarInput(event, "character")} />
                     </div>

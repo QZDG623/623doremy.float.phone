@@ -358,6 +358,23 @@ const RICH_PATTERNS: {
             mediaData: { meetingInviteStatus: "pending" as const },
         }),
     },
+    {
+        // 角色非常渴望见面时强制开启线下剧情。标记由聊天页消费，不落库展示。
+        regex: new RegExp(`\\[开启线下剧情${C}([^\\]]+)\\]`),
+        build: (m) => ({
+            content: "",
+            mediaType: "force_offline_story" as const,
+            mediaData: { forceStoryTitle: m[1].trim() },
+        }),
+    },
+    {
+        regex: /\[开启线下剧情\]/,
+        build: () => ({
+            content: "",
+            mediaType: "force_offline_story" as const,
+            mediaData: {},
+        }),
+    },
     // 群聊带主语宾语的格式（优先匹配）
     {
         regex: /\[([^\]]+)领取了([^\]]+)的红包\]/,

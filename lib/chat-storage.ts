@@ -47,6 +47,10 @@ export type ChatSession = {
     userAvatarOverride?: string;
     /** 用户更换当前会话头像后是否通知角色。未设置时默认开启 */
     notifyCharacterOnUserAvatarChange?: boolean;
+    /** 允许角色在聊天中感知用户发来的图片并自主把它换成自己的头像。未设置时默认开启 */
+    allowCharacterAvatarFromChat?: boolean;
+    /** 允许角色在非常渴望见面、准备惊喜或主动推进见面时直接创建分线并进入线下剧情。未设置时默认开启 */
+    allowForcedOfflineStory?: boolean;
     /** 角色给用户设置的私聊备注；会显示在“查手机”的真实私聊列表中。 */
     characterRemarkForUser?: string;
     /** 角色给用户备注的最后更新时间。 */
@@ -129,6 +133,7 @@ export type ChatMessage = {
         | "poke" | "sticker" | "quote" | "dice"
         | "voice_call" | "video_call"
         | "meeting_invite"
+        | "force_offline_story"
         | "accept_red_packet" | "decline_red_packet" | "accept_transfer" | "decline_transfer"
         | "payment_request" | "accept_payment_request" | "decline_payment_request"
         | "music" | "music_share" | "music_notify" | "music_not_found"
@@ -258,6 +263,8 @@ export type ChatMessage = {
         meetingInviteDeclineResponse?: string;
         meetingInviteResolvedAt?: string;
         meetingInviteStorySessionId?: string;
+        /** 角色主动强制开启线下剧情时使用的分线标题。 */
+        forceStoryTitle?: string;
         fileType?: "audio" | "image" | "video" | "file";
         fileName?: string;
         fileDuration?: number;
@@ -359,8 +366,9 @@ export function resolveMeetingInviteCardConfig(settings?: ChatAppSettings): Meet
     const raw = settings?.meetingInviteCard;
     return {
         mode: raw?.mode === "custom" ? "custom" : "native",
-        // enabled / remarkEnabled 默认 false：不每轮注入，仅检测到相关话题时才注入
-        enabled: raw?.enabled === true ? true : false,
+        // enabled / remarkEnabled 默认为 true：见面邀请与私聊备注开箱即用；
+        // 用户在全局聊天信息里显式关闭后才停止注入。
+        enabled: raw?.enabled !== false,
         remarkEnabled: raw?.remarkEnabled === true ? true : false,
         contract: typeof raw?.contract === "string" ? raw.contract : DEFAULT_MEETING_INVITE_CONTRACT,
         renderHtml: typeof raw?.renderHtml === "string" ? raw.renderHtml : DEFAULT_MEETING_INVITE_RENDER,
@@ -515,6 +523,7 @@ function resolvePendingAvatarRecommendation(message: ChatMessage): void {
 
     const session = _sessionsCache.find(item => item.id === message.sessionId);
     if (!session || session.isGroup) return;
+    if (session.allowCharacterAvatarFromChat === false) return;
     const legacyRecommendation = [..._messagesCache].reverse().find(item =>
         item.sessionId === message.sessionId
         && item.role === "user"
@@ -523,8 +532,10 @@ function resolvePendingAvatarRecommendation(message: ChatMessage): void {
         && item.mediaData?.avatarRecommendationStatus === "pending"
         && Boolean(item.mediaUrl),
     );
-    const recommendation = legacyRecommendation
-        || findUserAvatarChangeIntent(_messagesCache, message.sessionId, session.contactId)?.image;
+    const intentMatch = legacyRecommendation
+        ? null
+        : findUserAvatarChangeIntent(_messagesCache, message.sessionId, session.contactId);
+    const recommendation = legacyRecommendation || intentMatch?.image;
     if (!recommendation) return;
 
     const explicitAccepted = AVATAR_ACCEPT_RE.test(message.rawResponseText);
@@ -532,8 +543,11 @@ function resolvePendingAvatarRecommendation(message: ChatMessage): void {
     const inferredDecision = !explicitAccepted && !explicitDeclined
         ? inferAvatarDecisionFromReply(`${message.rawResponseText}\n${message.content}`)
         : null;
-    const accepted = explicitAccepted || inferredDecision === "accepted";
-    const declined = explicitDeclined || inferredDecision === "declined";
+    // 用户明确要求“这张当头像使用”时，只要角色没有明确拒绝就默认采用，
+    // 避免模型忘记输出控制标记导致看起来“设了没反应”。
+    const accepted = explicitAccepted || inferredDecision === "accepted"
+        || (Boolean(intentMatch) && !explicitDeclined && inferredDecision !== "declined");
+    const declined = !accepted && (explicitDeclined || inferredDecision === "declined");
     if (!accepted && !declined) return;
 
     recommendation.mediaData = {
@@ -570,6 +584,7 @@ const MEDIA_PREVIEW_MAP: Record<string, string> = {
     poke: "[拍了拍你]", sticker: "[表情]", quote: "[引用]", dice: "[掷骰子]",
     gift: "[礼物]",
     contact_card: "[名片]",
+    meeting_invite: "[邀请见面]",
     payment_request: "[代付请求]",
     music: "[音乐]",
     music_share: "[音乐分享]",

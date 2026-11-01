@@ -2972,6 +2972,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
 
         // Detect call triggers and AI media actions, filter them out
         let triggerCall: "voice" | "video" | undefined;
+        let forceStoryTitle: string | undefined;
         let hasDecline = false;
         const charN = character?.name || "对方";
         const userN = userIdentity?.name || "你";
@@ -2998,6 +2999,13 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                         meetingInviteCharacterName: charN,
                     },
                 });
+                continue;
+            }
+            if (p.mediaType === "force_offline_story") {
+                // 由私聊角色主动推进的线下剧情：标记不展示，处理为创建分线并进入剧情。
+                if (!session.isGroup && session.allowForcedOfflineStory !== false) {
+                    forceStoryTitle = p.mediaData?.forceStoryTitle?.trim() || "";
+                }
                 continue;
             }
             if (p.mediaType === "accept_red_packet" || p.mediaType === "decline_red_packet"
@@ -3166,8 +3174,50 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             await Promise.allSettled(imageReplacementTasks);
             throwIfGenerationStopped(options);
         }
+        if (forceStoryTitle !== undefined) {
+            await openOfflineStoryBranch({
+                title: forceStoryTitle,
+                launchPrompt: `${charN}非常渴望见面并主动开启了这次线下剧情。${forceStoryTitle ? `本次分线：${forceStoryTitle}。` : ""}请由${charN}承接刚才私聊的语境自然开始见面剧情。`,
+            }).catch(error => {
+                showChatToast(error instanceof Error ? error.message : "开启线下剧情失败，请稍后再试");
+            });
+        }
         return { hasVisible: true, stateValues, triggerCall, hasDecline };
     };
+
+    async function openOfflineStoryBranch(params: { title?: string; launchPrompt: string }) {
+        await hydrateStoryStorage();
+        const characterId = session.contactId;
+        const mainSession = loadStorySessionsForOwner("single", characterId)
+            .find((item) => (item.branchId || "main") === "main")
+            || createOrGetStorySession(characterId, { ownerType: "single", ownerId: characterId, branchId: "main" });
+        const now = new Date();
+        const fallbackTitle = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日 ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+        const branchName = params.title?.trim() || fallbackTitle;
+        const storySession = createOrGetStorySession(characterId, {
+            ownerType: "single",
+            ownerId: characterId,
+            participantIds: [characterId],
+            branchId: `invite_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            branchName,
+            inheritRecentMemory: true,
+            independentStory: false,
+            baseSession: mainSession,
+        });
+        const resolvedAt = new Date().toISOString();
+        const launchPrompt = params.launchPrompt;
+        updateStorySession(storySession.id, {
+            autoStartPrompt: launchPrompt,
+            autoStartRequestedAt: resolvedAt,
+        });
+        saveStoryLaunchTarget({
+            ...storySession,
+            autoStartPrompt: launchPrompt,
+            autoStartRequestedAt: resolvedAt,
+        });
+        window.dispatchEvent(new CustomEvent("open-app", { detail: { appId: "story" } }));
+        return storySession;
+    }
 
     // Helper: handle AI-triggered call from splitAndSaveAIMessages result
     const handleCallTrigger = (triggerCall?: "voice" | "video") => {

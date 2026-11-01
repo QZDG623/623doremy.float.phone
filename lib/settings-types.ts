@@ -230,6 +230,23 @@ export type NovelAiSettings = {
     presets: NovelAiPreset[];
 };
 
+export type CharacterReferenceAnchor = {
+    id: string;
+    /** 锚点名称，例如“红色围巾”“左耳银色耳钉”。 */
+    label: string;
+    /** 可选说明，会追加到生图提示词。 */
+    description?: string;
+    /** 可选锚点图片，与说明一起用于生图。 */
+    assetId?: string;
+    enabled?: boolean;
+};
+
+export type UserReferenceImage = {
+    assetId?: string;
+    enabled?: boolean;
+    updatedAt: number;
+};
+
 export type ImageGenerationSettings = {
     enabled: boolean;
     provider?: ImageGenerationProvider;
@@ -262,7 +279,11 @@ export type ImageGenerationSettings = {
             y: number;
             size: number;
         };
+        /** 角色固定锚点：重要配饰、衣物或外貌特征，可带参考图。 */
+        anchors?: CharacterReferenceAnchor[];
     }>;
+    /** 用户参考图：按用户身份 ID 保存，生成合照或含用户的角色图时使用。 */
+    userReferences?: Record<string, UserReferenceImage>;
     imageHosting: ImageHostingSettings;
 };
 

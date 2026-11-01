@@ -37,7 +37,9 @@
 //      重试，并新增睡眠电台 App。升版让设备丢掉旧 JS，拉取带新面板的构建。
 // v34：剧情后台生成、目录分组、通用生成能力与尾部开关、悬浮小手机改为完整聊天界面，
 //      睡眠电台支持正倒序与汇总所有 App 的语音。
-const CACHE_VERSION = "ai-phone-pwa-v34";
+// v35：聊天信息新增强制开启线下剧情；默认开启见面邀请卡片；聊天发图可让角色自主换头像；
+//      生图支持角色锚点与用户参考图（合照/共同自拍）。
+const CACHE_VERSION = "ai-phone-pwa-v35";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 
