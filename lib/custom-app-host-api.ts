@@ -1383,6 +1383,18 @@ export async function generateCustomAppImage(app: InstalledCustomApp, record: Re
     })
   ));
   if (!result) throw new Error("生图功能未配置或未启用，请先在小手机设置里配置生图 API。");
+  // 带角色 id 的图直接收进收藏夹：这类图不进聊天记录、也不是朋友圈帖子，
+  // 收藏夹扫描时看不到，只能在这里就地存一份（按角色归档）。
+  if (characterId) {
+    void import("./archive-storage")
+      .then(({ archiveGeneratedImage }) => archiveGeneratedImage({
+        characterId,
+        text: description,
+        sourceId: `custom_${app.id}_${Date.now().toString(36)}`,
+        blob: result.blob,
+      }))
+      .catch(() => undefined);
+  }
   return {
     ok: true,
     dataUrl: result.dataUrl,

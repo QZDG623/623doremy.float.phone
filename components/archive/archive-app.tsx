@@ -14,6 +14,7 @@ import { ChevronLeft, Image as ImageIcon, MessageSquareText, Mic, Trash2, BookOp
 import {
   ARCHIVE_KIND_LABEL,
   groupArchiveByCharacter,
+  hydrateArchiveVoiceMedia,
   loadArchiveEntries,
   removeArchiveEntry,
   syncGeneratedChatImages,
@@ -88,7 +89,7 @@ function ArchiveVoice({ url, text }: { url?: string; text: string }) {
       ) : (
         <span className="arc-voice-missing">语音文件已被清理</span>
       )}
-      {text ? <p className="arc-voice-text">{text}</p> : null}
+      {text ? <p className="arc-voice-text">{cleanVoiceDisplay(text)}</p> : null}
     </div>
   );
 }
@@ -104,13 +105,41 @@ export function ArchiveApp({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     const onUpdated = () => refresh();
     window.addEventListener("archive-updated", onUpdated);
-    // 打开时扫一次生成的图片：收藏夹不该要求用户记得「先同步」
-    setSyncing(true);
-    void syncGeneratedChatImages().finally(() => {
-      setSyncing(false);
-      refresh();
-    });
-    return () => window.removeEventListener("archive-updated", onUpdated);
+
+    let cancelled = false;
+    let timer: number | undefined;
+
+    // 打开时扫一次：收藏夹不该要求用户记得「先同步」。
+    // 同步图片（聊天/朋友圈/其他 App）与补旧语音音频一起跑。
+    const syncNow = () => {
+      if (cancelled) return;
+      setSyncing(true);
+      void Promise.all([syncGeneratedChatImages(), hydrateArchiveVoiceMedia()]).finally(() => {
+        if (cancelled) return;
+        setSyncing(false);
+        refresh();
+      });
+    };
+
+    // 聊天/朋友圈刚生成了新图（生成是异步的，可能发生在收藏夹打开之后）：
+    // 防抖后再扫一次，新图不用重开 App 就能进来。
+    const onNewMedia = () => {
+      if (cancelled) return;
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(syncNow, 1500);
+    };
+
+    syncNow();
+    window.addEventListener("moments-updated", onNewMedia);
+    window.addEventListener("chat-messages-updated", onNewMedia);
+
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+      window.removeEventListener("archive-updated", onUpdated);
+      window.removeEventListener("moments-updated", onNewMedia);
+      window.removeEventListener("chat-messages-updated", onNewMedia);
+    };
   }, [refresh]);
 
   const entries = useMemo(() => loadArchiveEntries(), [version]);
@@ -165,7 +194,13 @@ export function ArchiveApp({ onClose }: { onClose: () => void }) {
             {groups.length === 0 ? (
               <div className="arc-empty">
                 {syncing ? "正在整理档案…" : `还没有${ARCHIVE_KIND_LABEL[kind]}素材`}
-                <small>{kind === "image" ? "角色生成图片后会自动收进这里" : "在聊天或剧情里长按消息，点「收藏」"}</small>
+                <small>
+                  {kind === "image"
+                    ? "聊天、朋友圈和其他 App 里角色生成的图片会自动收进这里"
+                    : kind === "voice"
+                      ? "在聊天里长按语音条，点「收藏」；收藏后可以反复播放"
+                      : "在聊天或剧情里长按消息，点「收藏」"}
+                </small>
               </div>
             ) : (
               <div className="arc-grid">
@@ -259,6 +294,15 @@ function ArchiveItem({ entry, onRemove }: { entry: ArchiveEntry; onRemove: () =>
       {entry.kind === "image" && entry.text ? <p className="arc-item-caption">{entry.text}</p> : null}
     </article>
   );
+}
+
+/** 语音台词里带 TTS 表演标记（(breath)、<#0.3#>），展示时清掉，只留人话。 */
+function cleanVoiceDisplay(text: string): string {
+  return text
+    .replace(/\(\s*(?:laughs?|chuckle|coughs?|clear-throat|groans?|breath|pant|inhale|exhale|gasp|sniffs?|sighs?|snorts?|burps?|lip-smacking|humming|hissing|emm|sneezes?)\s*\)/gi, "")
+    .replace(/<#[\d.]+#>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function formatArchiveTime(iso: string): string {

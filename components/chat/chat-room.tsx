@@ -4,7 +4,7 @@ import { forwardRef, Fragment, memo, useCallback, useEffect, useImperativeHandle
 import { ChatSession, ChatMessage, CHAT_APP_SETTINGS_UPDATED_EVENT, CHAT_INITIAL_VISIBLE_MESSAGE_COUNT, CHAT_LOAD_MORE_MESSAGE_COUNT, CHAT_REQUEST_REPLY_EVENT, loadChatAppSettings, loadChatMessages, loadChatContacts, loadChatSessions, saveChatSessions, pushChatMessage, updateChatMessage, deleteChatMessage, deleteChatMessagesFrom, deleteChatMessagesByIds, retractChatMessage, editChatMessage, updateMessageMediaData, replaceResponseBatchWithParts, replaceGroupResponseRound, isReadingDiscussMessage, isSystemInstructionMessage, getSystemInstructionDisplayContent, createResponseBatchId, createResponseRoundId, getLatestStateValues, getLatestCharacterStateValues, compareChatMessages, isSessionStreamingEnabled, resolveChatBackgroundImage, resolveChatUserAvatar } from "@/lib/chat-storage";
 import { cleanStreamText, splitStreamPreviewSegments, stripLiteralTexts, stripXmlTagBlocks } from "@/lib/stream-preview";
 import type { StateValue } from "@/lib/chat-storage";
-import { addArchiveEntry } from "@/lib/archive-storage";
+import { addArchiveEntry, archiveVoiceMessage } from "@/lib/archive-storage";
 import { parseStateValues, mergeStateValues } from "@/lib/state-value-parser";
 import { parseAIResponse, isNonDialogueOnlyContent, type ParsedMessagePart } from "@/lib/rich-message-parser";
 import { isKnownStickerLabel } from "@/lib/sticker-data";
@@ -5177,6 +5177,29 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         const text = rawText || (kind === "voice" ? "[语音]" : kind === "image" ? "[图片]" : "");
         if (!text) return;
         const storedId = getStoredActionMessageId(m);
+
+        // 语音要额外把音频本体存下来（没有现成音频就按台词合成一次），
+        // 这样收藏夹里能反复播放，而不是只剩一行转写。
+        if (kind === "voice") {
+            setActiveMessageId(null);
+            showChatToast(m.mediaUrl ? "正在保存这条语音…" : "正在合成并收藏这条语音…");
+            void archiveVoiceMessage({
+                characterId: session.contactId,
+                characterName: character?.name || session.alias || "角色",
+                characterAvatar: character?.avatar || undefined,
+                sourceId: storedId,
+                sessionId: session.id,
+                text,
+                mediaUrl: m.mediaUrl,
+                createdAt: m.createdAt,
+            }).then(result => {
+                if (result.status === "exists") showChatToast("这条已经在收藏夹里了");
+                else if (result.playable) showChatToast("已收藏这条语音，可在收藏夹里重复播放");
+                else showChatToast("已收藏语音文字，但音频合成失败");
+            }).catch(() => showChatToast("收藏语音失败，请稍后再试"));
+            return;
+        }
+
         const added = addArchiveEntry({
             kind,
             characterId: session.contactId,
@@ -5190,7 +5213,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             auto: false,
         });
         showChatToast(added
-            ? (kind === "voice" ? "已收藏这条语音" : kind === "image" ? "已收藏这张图" : "已收藏这条聊天记录")
+            ? (kind === "image" ? "已收藏这张图" : "已收藏这条聊天记录")
             : "这条已经在收藏夹里了");
         setActiveMessageId(null);
     };

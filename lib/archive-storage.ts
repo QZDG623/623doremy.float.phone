@@ -178,16 +178,202 @@ function archiveCode(characterId: string): string {
   return `PF-${code}`;
 }
 
+// ── 语音收藏：把音频本体留下来 ─────────────────────
+//
+// 聊天里的语音条以前只存了文字转写，音频要么还没合成、要么被存储清理置空，
+// 收藏进档案后只剩一行字（「语音文件已被清理」）。收藏是快照，音频也必须
+// 一起留下来：这里把现有音频转存进资产库，没有就把文字重新合成一次，
+// 档案里的地址改成 asset:// 引用，可以反复播放。
+
+/** 存进资产库（与聊天图片同一套 IndexedDB），返回可长期引用的 asset:// 地址。 */
+async function storeVoiceAsset(blob: Blob): Promise<string | null> {
+  try {
+    const { saveChatAudioToIndexedDB } = await import("./chat-asset-storage");
+    const id = await saveChatAudioToIndexedDB(blob);
+    return `asset://${id}`;
+  } catch {
+    return null;
+  }
+}
+
+/** 把任意媒体地址转成收藏夹能长期播放的地址；转不了返回 null。 */
+async function durableVoiceUrl(raw?: string): Promise<string | null> {
+  const url = raw?.trim();
+  if (!url) return null;
+  if (url.startsWith("asset://")) return url;
+  try {
+    if (url.startsWith("data:") || url.startsWith("blob:")) {
+      return await storeVoiceAsset(await (await fetch(url)).blob());
+    }
+    if (url.startsWith("media-store://")) {
+      const { loadMediaBlob } = await import("./media-cache-storage");
+      const loaded = await loadMediaBlob(url);
+      return loaded ? await storeVoiceAsset(loaded.blob) : null;
+    }
+  } catch {
+    return null;
+  }
+  // http(s) 等本来就能长期访问的地址直接用
+  return url;
+}
+
+/** 用角色的语音配置把文字合成一段音频，并转存进资产库。 */
+async function synthesizeVoiceAsset(characterId: string, text: string): Promise<string | null> {
+  const speakable = text.trim();
+  if (!speakable) return null;
+  try {
+    const { resolveVoiceConfig, synthesizeSpeech } = await import("./tts-service");
+    const config = resolveVoiceConfig(characterId);
+    if (!config) return null;
+    const blob = await synthesizeSpeech(speakable, config);
+    return blob ? await storeVoiceAsset(blob) : null;
+  } catch {
+    return null;
+  }
+}
+
+export type ArchiveVoiceInput = {
+  characterId: string;
+  characterName: string;
+  characterAvatar?: string;
+  sourceId: string;
+  sessionId?: string;
+  /** 展示用的台词/转写（可能带 TTS 标记，合成时会自动清洗） */
+  text: string;
+  mediaUrl?: string;
+  createdAt: string;
+};
+
+/**
+ * 收藏一条语音：优先保留已有音频；没有就按台词重新合成。
+ * 合成不出来也照样收藏文字（至少不丢内容），返回 playable=false。
+ */
+export async function archiveVoiceMessage(input: ArchiveVoiceInput): Promise<{ status: "added" | "exists"; playable: boolean }> {
+  const store = loadStore();
+  const existing = store.entries.find(entry => entry.kind === "voice" && entry.sourceId === input.sourceId);
+  // 已经收藏过且音频还在：不重复合成
+  if (existing?.mediaUrl) return { status: "exists", playable: true };
+
+  let mediaUrl = await durableVoiceUrl(input.mediaUrl);
+  const speechText = input.text.trim();
+  if (!mediaUrl && speechText && speechText !== "[语音]") {
+    mediaUrl = await synthesizeVoiceAsset(input.characterId, speechText);
+  }
+
+  // 旧条目只有文字（音频被清理过）：这次顺手补上音频，而不是只回一句「已收藏」
+  if (existing) {
+    if (mediaUrl) {
+      existing.mediaUrl = mediaUrl;
+      saveStore(store);
+    }
+    return { status: "exists", playable: Boolean(existing.mediaUrl) };
+  }
+
+  addArchiveEntry({
+    kind: "voice",
+    characterId: input.characterId,
+    characterName: input.characterName,
+    characterAvatar: input.characterAvatar,
+    sourceId: input.sourceId,
+    sessionId: input.sessionId,
+    text: input.text,
+    mediaUrl: mediaUrl ?? undefined,
+    createdAt: input.createdAt,
+    auto: false,
+  });
+  return { status: "added", playable: mediaUrl !== null };
+}
+
+/**
+ * 给旧收藏里只有文字的语音补合成音频（每次打开收藏夹先补几条，
+ * 合成一次就写回条目，之后打开直接播放，不会重复消耗额度）。
+ */
+export async function hydrateArchiveVoiceMedia(limit = 4): Promise<number> {
+  const store = loadStore();
+  let updated = 0;
+  for (const entry of store.entries) {
+    if (updated >= limit) break;
+    if (entry.kind !== "voice" || entry.mediaUrl) continue;
+    const text = entry.text?.trim();
+    if (!text || text === "[语音]") continue;
+    const mediaUrl = await synthesizeVoiceAsset(entry.characterId, text);
+    if (!mediaUrl) continue;
+    entry.mediaUrl = mediaUrl;
+    updated += 1;
+  }
+  if (updated > 0) saveStore(store);
+  return updated;
+}
+
 // ── 自动归档生成的图片 ────────────────────────────
 
 /** 自动归档的状态提示，给调用方做「已同步 N 张」之类反馈。 */
 export const ARCHIVE_IMAGE_LIMIT = 300;
 
 /**
- * 扫描聊天库里角色生成的图片，自动归档进收藏夹。
+ * 其他 App（自定义 App 的 ai.generateImage）生成了一张图：直接归档。
  *
- * 只取「角色发的图」（role=assistant、mediaType=image），用户自己发的图不自动收藏——
- * 收藏夹是「角色留下的东西」，把用户相册也搬进来只会变成第二个相册。
+ * 这类图不进聊天记录，也没有朋友圈帖子，扫描不到，所以生成成功时就地存一份。
+ * 只收「带角色 id」的图——没有角色就不知道该归到谁的档案里。
+ */
+export async function archiveGeneratedImage(input: {
+  characterId: string;
+  characterName?: string;
+  characterAvatar?: string;
+  sourceId?: string;
+  text?: string;
+  blob: Blob;
+}): Promise<boolean> {
+  try {
+    const { saveChatImageToIndexedDB } = await import("./chat-asset-storage");
+    const assetId = await saveChatImageToIndexedDB(input.blob);
+    if (!assetId) return false;
+    let characterName = input.characterName?.trim() || "";
+    let characterAvatar = input.characterAvatar?.trim() || undefined;
+    if (!characterName) {
+      try {
+        const { loadCharacters } = await import("./character-storage");
+        const character = loadCharacters().find(item => item.id === input.characterId);
+        characterName = character?.name || "角色";
+        characterAvatar = characterAvatar || character?.avatar || undefined;
+      } catch {
+        characterName = "角色";
+      }
+    }
+    return addArchiveEntry({
+      kind: "image",
+      characterId: input.characterId,
+      characterName,
+      characterAvatar,
+      sourceId: input.sourceId || `custom_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      text: input.text?.trim() || "角色生成的一张图",
+      mediaUrl: `asset://${assetId}`,
+      createdAt: new Date().toISOString(),
+      auto: true,
+    });
+  } catch {
+    return false;
+  }
+}
+
+/** 一条消息/帖子是不是「角色这边的一张图」。 */
+function isImageContent(mediaType: string | undefined, mediaData: unknown, fileName: string): boolean {
+  if (mediaType === "image") return true;
+  if (mediaType !== "media_file") return false;
+  const data = (mediaData ?? {}) as { fileType?: string };
+  return data.fileType === "image" || /\.(png|jpe?g|webp|gif)$/i.test(fileName);
+}
+
+/**
+ * 扫描各个 App 里角色生成的图片，自动归档进收藏夹。
+ *
+ * 覆盖：
+ *   · 聊天：角色发的图片（含生成完成后变成 media_file 的图）；
+ *   · 朋友圈：角色发的带图动态；
+ *   · 其他 App：生成时通过 ai.generateImage 带角色 id 的图片会直接写入收藏夹。
+ *
+ * 用户自己发的图不自动收藏——收藏夹是「角色留下的东西」，
+ * 把用户相册也搬进来只会变成第二个相册。
  *
  * 异步读 IndexedDB，失败静默（收藏夹打不开也不该报错）。
  */
@@ -210,35 +396,93 @@ export async function syncGeneratedChatImages(): Promise<number> {
     const known = new Set(store.entries.map(entry => `${entry.kind}:${entry.sourceId}`));
 
     let added = 0;
-    for (const message of messages) {
-      if (added >= ARCHIVE_IMAGE_LIMIT) break;
-      if (message.role !== "assistant" || message.mediaType !== "image" || !message.mediaUrl) continue;
-      const session = sessionById.get(message.sessionId);
-      if (!session || session.isGroup) continue;
-      const character = characterById.get(session.contactId);
-      const characterName = character?.name || session.alias || "角色";
-      const sourceId = message.id;
-      const key = `image:${sourceId}`;
-      if (hidden.has(key) || known.has(key)) continue;
-
-      const description = message.mediaData?.label?.trim() || message.content?.trim() || "";
+    const pushImage = (input: {
+      sourceId: string;
+      characterId: string;
+      characterName: string;
+      characterAvatar?: string;
+      sessionId?: string;
+      text: string;
+      mediaUrl: string;
+      createdAt: string;
+    }) => {
+      if (added >= ARCHIVE_IMAGE_LIMIT) return;
+      const key = `image:${input.sourceId}`;
+      if (hidden.has(key) || known.has(key)) return;
       store.entries.unshift({
         id: `arc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
         kind: "image",
-        characterId: session.contactId,
-        characterName,
-        characterAvatar: character?.avatar || undefined,
-        sourceId,
-        sessionId: session.id,
-        text: description || "角色生成的一张图",
-        mediaUrl: message.mediaUrl,
-        createdAt: message.createdAt,
+        characterId: input.characterId,
+        characterName: input.characterName,
+        characterAvatar: input.characterAvatar,
+        sourceId: input.sourceId,
+        sessionId: input.sessionId,
+        text: input.text || "角色生成的一张图",
+        mediaUrl: input.mediaUrl,
+        createdAt: input.createdAt,
         savedAt: new Date().toISOString(),
         auto: true,
       });
       known.add(key);
       added += 1;
+    };
+
+    // ── 聊天 ──
+    for (const message of messages) {
+      if (added >= ARCHIVE_IMAGE_LIMIT) break;
+      if (message.role !== "assistant" || !message.mediaUrl) continue;
+      if (!isImageContent(message.mediaType, message.mediaData, message.content || "")) continue;
+      const session = sessionById.get(message.sessionId);
+      if (!session) continue;
+
+      // 群聊里按实际发言角色归；没有发言者信息就跳过，避免把图算到群主头上
+      let characterId = session.contactId;
+      let characterName = characterById.get(session.contactId)?.name || session.alias || "角色";
+      let characterAvatar = characterById.get(session.contactId)?.avatar || undefined;
+      if (session.isGroup) {
+        const senderId = message.senderCharacterId;
+        if (!senderId) continue;
+        const sender = characterById.get(senderId);
+        characterId = senderId;
+        characterName = sender?.name || message.senderName || "角色";
+        characterAvatar = sender?.avatar || undefined;
+      }
+      if (!characterId) continue;
+
+      pushImage({
+        sourceId: message.id,
+        characterId,
+        characterName,
+        characterAvatar,
+        sessionId: session.id,
+        text: message.mediaData?.label?.trim() || message.content?.trim() || "",
+        mediaUrl: message.mediaUrl,
+        createdAt: message.createdAt,
+      });
     }
+
+    // ── 朋友圈 ──
+    try {
+      const { momentsDb } = await import("./moments-db");
+      const posts = await momentsDb.posts.orderBy("createdAt").reverse().limit(1000).toArray();
+      for (const post of posts) {
+        if (added >= ARCHIVE_IMAGE_LIMIT) break;
+        if (post.authorType !== "character" || !post.photoUrl) continue;
+        const character = characterById.get(post.authorId);
+        pushImage({
+          sourceId: `moment_${post.id}`,
+          characterId: post.authorId,
+          characterName: character?.name || "角色",
+          characterAvatar: character?.avatar || undefined,
+          text: post.photoDescription?.trim() || post.content?.trim() || "",
+          mediaUrl: post.photoUrl,
+          createdAt: post.createdAt,
+        });
+      }
+    } catch {
+      /* 朋友圈库打不开就跳过这一块 */
+    }
+
     if (added > 0) saveStore(store);
     return added;
   } catch {
