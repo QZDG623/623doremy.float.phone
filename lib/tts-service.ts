@@ -19,6 +19,30 @@ export function resolveVoiceConfig(characterId: string, appId?: ContentAppId): V
 }
 
 /**
+ * 合成时可尝试的语音方案：绑定方案优先，再兜底其它已配置 Key 的合成方案。
+ *
+ * 为什么需要兜底：绑定槽位可能指向一个还没填 Key 的默认方案（新建配置后忘了
+ * 重新绑定），此时绑定方案必然失败。语音条是刚需，只要用户配置过任何一个
+ * 可用的合成方案，就应该能出声，而不是整条语音都变成「合成失败」。
+ */
+export function resolveVoiceConfigCandidates(characterId?: string, appId?: ContentAppId): VoiceApiConfig[] {
+    const bound = characterId ? resolveVoiceConfig(characterId, appId) : null;
+    const list: VoiceApiConfig[] = [];
+    if (bound && bound.apiKey?.trim()) list.push(bound);
+    try {
+        const configs = loadVoiceConfigs();
+        for (const config of configs) {
+            if (config.enableTTS === false || !config.apiKey?.trim()) continue;
+            if (list.some(item => item.id === config.id)) continue;
+            list.push(config);
+        }
+    } catch {
+        /* 配置读不出来时只保留绑定方案 */
+    }
+    return list;
+}
+
+/**
  * Synthesize speech from text using the given voice config.
  * Returns an audio Blob (mp3/wav) or null if synthesis failed.
  *
@@ -34,9 +58,12 @@ export async function synthesizeSpeech(
 ): Promise<Blob | null> {
     if (!text.trim()) return null;
 
-    const provider = voiceConfig.provider;
+    const provider = voiceConfig.provider?.trim();
+    // 兼容大小写/空格差异（旧配置里出现过 "minimax" / "Fish Audio"），
+    // 否则会落进最后的 return null，界面只显示「合成失败」而看不出原因。
+    const providerKey = provider?.toLowerCase().replace(/\s+/g, "");
 
-    if (provider === "Minimax") {
+    if (providerKey === "minimax") {
         // 只念台词：先剥离 HTML/CSS 与旁白，并保留世界书的 (breath) 等 Sound Tag。
         // dropLatin 必须为 false —— 台词正文里的英文要照常念出来。
         const speechText = sanitizeSpeechText(text, { keepSoundTags: true, dropLatin: false });
@@ -59,7 +86,7 @@ export async function synthesizeSpeech(
         return synthesizeMinimax(finalText, voiceConfig, emotion);
     }
 
-    if (provider === "OpenAI") {
+    if (providerKey === "openai") {
         // OpenAI TTS 不认 Sound Tag，会把标签当文本念出来，所以一并清掉；
         // 它也没有情绪参数，纯英文角色要能正常发声，故保留英文。
         const speechText = sanitizeSpeechText(text, { keepSoundTags: false, dropLatin: false });
@@ -67,7 +94,7 @@ export async function synthesizeSpeech(
         return synthesizeOpenAI(speechText, voiceConfig);
     }
 
-    if (provider === "FishAudio") {
+    if (providerKey === "fishaudio") {
         // 括号里的表演标记（(breath)/(sighs) 等）各家模型支持程度不一，
         // Fish 不保证识别，直接清掉，避免被当成英文字念出来。台词里的英文照常保留。
         const speechText = sanitizeSpeechText(text, { keepSoundTags: false, dropLatin: false });
@@ -84,6 +111,10 @@ export async function synthesizeSpeech(
 // timeout. That froze voice/video calls at "对方正在说话..." until the user
 // toggled the mic. Abort after a ceiling so the caller can recover.
 const TTS_TIMEOUT_MS = 120_000;
+
+function delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = TTS_TIMEOUT_MS): Promise<Response> {
     const controller = new AbortController();
@@ -524,27 +555,60 @@ async function synthesizeMinimax(text: string, config: VoiceApiConfig, emotion?:
         }),
     });
 
-    let response = await request(true);
+    // 网络抖动（DNS/连接被重置）会让 fetch 直接抛 TypeError。语音是刚需，
+    // 一次抖动不该让整条语音变成「合成失败·点击重试」，先退避重试一次。
+    const requestWithRetry = async (): Promise<Response> => {
+        try {
+            return await request(true);
+        } catch (error) {
+            if (!(error instanceof TypeError)) throw error;
+            await delay(800);
+            return request(false);
+        }
+    };
+
+    let response = await requestWithRetry();
     // 情绪参数在个别模型/账号上不被接受。语音是刚需，不能因为一个可选的
     // 情绪参数被拒就整条失声——退一步用原声再发一次。
     if (!response.ok && useEmotion) response = await request(false);
+
+    // 429/5xx 是临时性的（限流/服务端抖动）：稍等再试一次，不直接判失败。
+    if (response.status === 429 || response.status >= 500) {
+        await delay(900);
+        response = await request(false);
+    }
 
     if (!response.ok) {
         const err = await response.json().catch(() => ({}));
         throw new Error(err.base_resp?.status_msg || `Minimax API 请求失败 (${response.status})`);
     }
 
-    const data = await response.json();
+    let data = await response.json();
+    const statusCode = Number(data?.base_resp?.status_code ?? 0);
+    // MiniMax 有时 HTTP 200 但 base_resp 里是限流错误（1002）：等一下再请求一次，
+    // 仍然失败才把服务端原文交给界面，而不是只显示笼统的「合成失败」。
+    if (!data.data?.audio && statusCode === 1002) {
+        await delay(1200);
+        const retried = await request(false);
+        if (retried.ok) data = await retried.json();
+    }
+
     if (data.data?.audio) {
         const hexString: string = data.data.audio;
-        const bytes = new Uint8Array(hexString.length / 2);
-        for (let i = 0; i < hexString.length; i += 2) {
-            bytes[i / 2] = parseInt(hexString.substring(i, i + 2), 16);
+        if (hexString.length < 2) throw new Error("Minimax 返回的音频数据为空");
+        const bytes = new Uint8Array(Math.floor(hexString.length / 2));
+        for (let i = 0; i < bytes.length; i += 1) {
+            bytes[i] = parseInt(hexString.substring(i * 2, i * 2 + 2), 16);
         }
         return new Blob([bytes], { type: "audio/mpeg" });
     }
 
-    throw new Error(data.base_resp?.status_msg || "Minimax 未返回音频数据");
+    const serverMessage = data.base_resp?.status_msg;
+    throw new Error(
+        statusCode !== 0
+            ? `Minimax(${statusCode})：${serverMessage || "合成失败"}`
+            : "Minimax 未返回音频数据",
+    );
 }
 
 // ── OpenAI TTS ──────────────────────────────────────

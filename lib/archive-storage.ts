@@ -222,11 +222,17 @@ async function synthesizeVoiceAsset(characterId: string, text: string): Promise<
   const speakable = text.trim();
   if (!speakable) return null;
   try {
-    const { resolveVoiceConfig, synthesizeSpeech } = await import("./tts-service");
-    const config = resolveVoiceConfig(characterId);
-    if (!config) return null;
-    const blob = await synthesizeSpeech(speakable, config);
-    return blob ? await storeVoiceAsset(blob) : null;
+    const { resolveVoiceConfigCandidates, synthesizeSpeech } = await import("./tts-service");
+    const configs = resolveVoiceConfigCandidates(characterId);
+    for (const config of configs.slice(0, 3)) {
+      try {
+        const blob = await synthesizeSpeech(speakable, config);
+        if (blob) return await storeVoiceAsset(blob);
+      } catch {
+        /* 换下一个可用方案 */
+      }
+    }
+    return null;
   } catch {
     return null;
   }
@@ -411,6 +417,68 @@ function isImageContent(mediaType: string | undefined, mediaData: unknown, fileN
 }
 
 /**
+ * 把任意图片地址转成资产库引用（asset://），转不了就返回 null。
+ *
+ * 只收藏**真的能取到图片字节**的条目：生成失败、还没生成（只有文字描述）
+ * 或者图片已经被存储清理的消息一律不收。旧收藏里那些 media-store 引用
+ * 也会在同步时被重新落到资产库，避免界面一直显示「图片已被清理」。
+ */
+async function durableImageUrl(raw?: string): Promise<string | null> {
+  const url = raw?.trim();
+  if (!url) return null;
+  try {
+    const { saveChatImageToIndexedDB, getChatImageFromIndexedDB } = await import("./chat-asset-storage");
+    if (url.startsWith("asset://")) {
+      const existing = await getChatImageFromIndexedDB(url.slice(8));
+      return existing ? url : null;
+    }
+    let blob: Blob | null = null;
+    if (url.startsWith("data:") || url.startsWith("blob:")) {
+      blob = await (await fetch(url)).blob();
+    } else if (url.startsWith("media-store://")) {
+      const { loadMediaBlob } = await import("./media-cache-storage");
+      blob = (await loadMediaBlob(url))?.blob ?? null;
+    } else if (/^https?:/i.test(url)) {
+      blob = await (await fetch(url)).blob();
+    }
+    if (!blob || blob.size === 0) return null;
+    const id = await saveChatImageToIndexedDB(blob);
+    return id ? `asset://${id}` : null;
+  } catch {
+    // 取不到（CORS/已清理/损坏）就当这条没有图，不收藏也不占位置
+    return null;
+  }
+}
+
+/** 收藏里的图片地址现在还能不能显示（真的去取一次，而不是只看有没有值）。 */
+async function isImageRefAlive(raw?: string): Promise<boolean> {
+  const url = raw?.trim();
+  if (!url) return false;
+  if (url.startsWith("asset://")) {
+    try {
+      const { getChatImageFromIndexedDB } = await import("./chat-asset-storage");
+      return Boolean(await getChatImageFromIndexedDB(url.slice(8)));
+    } catch {
+      return false;
+    }
+  }
+  if (url.startsWith("media-store://")) {
+    try {
+      const { loadMediaBlob } = await import("./media-cache-storage");
+      return Boolean(await loadMediaBlob(url));
+    } catch {
+      return false;
+    }
+  }
+  return url.startsWith("data:") || url.startsWith("blob:") || /^https?:/i.test(url);
+}
+
+/** 一条消息里当前可用的图片地址：生成图片的媒体引用优先（比 base64 小得多）。 */
+function messageImageRef(message: { mediaUrl?: string; mediaData?: { imageGenerationMediaRef?: string } }): string | undefined {
+  return message.mediaData?.imageGenerationMediaRef?.trim() || message.mediaUrl;
+}
+
+/**
  * 扫描各个 App 里角色生成的图片，自动归档进收藏夹。
  *
  * 覆盖：
@@ -440,9 +508,54 @@ export async function syncGeneratedChatImages(): Promise<number> {
     const store = loadStore();
     const hidden = new Set(store.hidden);
     const known = new Set(store.entries.map(entry => `${entry.kind}:${entry.sourceId}`));
+    const messageById = new Map(messages.map(message => [message.id, message]));
 
+    let changed = false;
     let added = 0;
-    const pushImage = (input: {
+
+    // 朋友圈先读出来：后面清理旧收藏时也要能按 moment_<id> 找回原图。
+    let posts: Array<{
+      id: string;
+      authorType: string;
+      authorId: string;
+      photoUrl?: string;
+      photoDescription?: string;
+      content?: string;
+      photoGenerationStatus?: string;
+      createdAt: string;
+    }> = [];
+    try {
+      const { momentsDb } = await import("./moments-db");
+      posts = await momentsDb.posts.orderBy("createdAt").reverse().limit(1000).toArray();
+    } catch {
+      /* 朋友圈库打不开就跳过这一块 */
+    }
+    const postById = new Map(posts.map(post => [post.id, post]));
+
+    // ── 先清理旧收藏：只保留真的还能显示出来的图 ──
+    // 以前的版本把「只有文字描述、图还没生成/已清理」的条目也收进来了，
+    // 界面上就是一条条「图片已被清理」。原消息里还能取到图就换成资产库地址，
+    // 取不到就删掉——收藏夹里不该留着空壳。
+    for (const entry of [...store.entries]) {
+      if (entry.kind !== "image" || !entry.auto) continue;
+      if (await isImageRefAlive(entry.mediaUrl)) continue;
+      const message = messageById.get(entry.sourceId);
+      const post = entry.sourceId.startsWith("moment_")
+        ? postById.get(entry.sourceId.slice("moment_".length))
+        : undefined;
+      const rawUrl = message ? messageImageRef(message) : post?.photoUrl;
+      const nextUrl = await durableImageUrl(rawUrl);
+      if (nextUrl) {
+        entry.mediaUrl = nextUrl;
+        changed = true;
+      } else {
+        store.entries = store.entries.filter(item => item.id !== entry.id);
+        known.delete(`image:${entry.sourceId}`);
+        changed = true;
+      }
+    }
+
+    const pushImage = async (input: {
       sourceId: string;
       characterId: string;
       characterName: string;
@@ -455,6 +568,10 @@ export async function syncGeneratedChatImages(): Promise<number> {
       if (added >= ARCHIVE_IMAGE_LIMIT) return;
       const key = `image:${input.sourceId}`;
       if (hidden.has(key) || known.has(key)) return;
+      // 关键：必须真的取到图片字节，并转存进资产库。只有文字描述的
+      // （生成失败/还没生成）在这里会被自然过滤掉。
+      const durableUrl = await durableImageUrl(input.mediaUrl);
+      if (!durableUrl) return;
       store.entries.unshift({
         id: `arc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
         kind: "image",
@@ -464,13 +581,14 @@ export async function syncGeneratedChatImages(): Promise<number> {
         sourceId: input.sourceId,
         sessionId: input.sessionId,
         text: input.text || "角色生成的一张图",
-        mediaUrl: input.mediaUrl,
+        mediaUrl: durableUrl,
         createdAt: input.createdAt,
         savedAt: new Date().toISOString(),
         auto: true,
       });
       known.add(key);
       added += 1;
+      changed = true;
     };
 
     // ── 聊天 ──
@@ -478,6 +596,9 @@ export async function syncGeneratedChatImages(): Promise<number> {
       if (added >= ARCHIVE_IMAGE_LIMIT) break;
       if (message.role !== "assistant" || !message.mediaUrl) continue;
       if (!isImageContent(message.mediaType, message.mediaData, message.content || "")) continue;
+      // 生图还没完成 / 失败的，不是「生成出来的图」，不收藏
+      const status = message.mediaData?.imageGenerationStatus;
+      if (status === "pending" || status === "failed") continue;
       const session = sessionById.get(message.sessionId);
       if (!session) continue;
 
@@ -495,45 +616,36 @@ export async function syncGeneratedChatImages(): Promise<number> {
       }
       if (!characterId) continue;
 
-      // 生图消息的 mediaUrl 是一整段 base64，直接塞进收藏夹会把 kv 撑得很大；
-      // imageGenerationMediaRef 是同一张图的 media-store:// 引用，优先用它。
-      const durableUrl = message.mediaData?.imageGenerationMediaRef?.trim() || message.mediaUrl;
-
-      pushImage({
+      await pushImage({
         sourceId: message.id,
         characterId,
         characterName,
         characterAvatar,
         sessionId: session.id,
         text: message.mediaData?.label?.trim() || message.content?.trim() || "",
-        mediaUrl: durableUrl,
+        mediaUrl: messageImageRef(message) || "",
         createdAt: message.createdAt,
       });
     }
 
     // ── 朋友圈 ──
-    try {
-      const { momentsDb } = await import("./moments-db");
-      const posts = await momentsDb.posts.orderBy("createdAt").reverse().limit(1000).toArray();
-      for (const post of posts) {
-        if (added >= ARCHIVE_IMAGE_LIMIT) break;
-        if (post.authorType !== "character" || !post.photoUrl) continue;
-        const character = characterById.get(post.authorId);
-        pushImage({
-          sourceId: `moment_${post.id}`,
-          characterId: post.authorId,
-          characterName: character?.name || "角色",
-          characterAvatar: character?.avatar || undefined,
-          text: post.photoDescription?.trim() || post.content?.trim() || "",
-          mediaUrl: post.photoUrl,
-          createdAt: post.createdAt,
-        });
-      }
-    } catch {
-      /* 朋友圈库打不开就跳过这一块 */
+    for (const post of posts) {
+      if (added >= ARCHIVE_IMAGE_LIMIT) break;
+      if (post.authorType !== "character" || !post.photoUrl) continue;
+      if (post.photoGenerationStatus === "pending" || post.photoGenerationStatus === "failed") continue;
+      const character = characterById.get(post.authorId);
+      await pushImage({
+        sourceId: `moment_${post.id}`,
+        characterId: post.authorId,
+        characterName: character?.name || "角色",
+        characterAvatar: character?.avatar || undefined,
+        text: post.photoDescription?.trim() || post.content?.trim() || "",
+        mediaUrl: post.photoUrl,
+        createdAt: post.createdAt,
+      });
     }
 
-    if (added > 0) saveStore(store);
+    if (changed) saveStore(store);
     return added;
   } catch {
     return 0;

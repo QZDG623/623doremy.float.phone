@@ -195,6 +195,18 @@ export function ArchiveApp({ onClose }: { onClose: () => void }) {
     };
   }, [refresh]);
 
+  // 侧滑/返回键：详情页先退回档案墙。只 preventDefault，不关整个收藏夹，
+  // 这样和原生 App 一样「返回上一界面」。
+  useEffect(() => {
+    const handler = (event: Event) => {
+      if (!openCharacterId) return;
+      event.preventDefault();
+      setOpenCharacterId(null);
+    };
+    window.addEventListener("float:back", handler);
+    return () => window.removeEventListener("float:back", handler);
+  }, [openCharacterId]);
+
   const entries = useMemo(() => loadArchiveEntries(), [version]);
 
   const entriesOfKind = useMemo(
@@ -281,7 +293,7 @@ export function ArchiveApp({ onClose }: { onClose: () => void }) {
                       <span className="arc-card-name">{group.characterName}</span>
                       <span className="arc-card-sub">个人档案</span>
                       <span className="arc-card-count">
-                        {group.entries.length > 8 ? "8+" : group.entries.length} 份素材
+                        {group.entries.length} 份素材
                       </span>
                     </button>
                   );

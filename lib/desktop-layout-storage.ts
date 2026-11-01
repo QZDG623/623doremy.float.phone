@@ -109,12 +109,14 @@ export function createDefaultDesktopIconLayout(_widgets: WidgetInstance[] = []):
       row: 5 + Math.floor(i / GRID_COLS),
       col: (i % GRID_COLS) + 1,
     })),
-    // 第三页：右半边 2×2（第 4~5 行、第 3~4 列），左半边留给日历组件
-    page3: PAGE_3_DEFAULT.map((id, i) => ({
-      id,
-      row: 4 + Math.floor(i / 2),
-      col: 3 + (i % 2),
-    })),
+    // 第三页：右半边 2×3（第 4~6 行、第 3~4 列），左半边留给日历组件；
+    // 第 7 个图标（睡眠电台）放到第 6 行左侧的空格（日历只占第 4~5 行），
+    // 避免按原公式排到第 7 行、越出 6 行的网格被 normalize 丢掉。
+    page3: PAGE_3_DEFAULT.map((id, i) => (
+      i < 6
+        ? { id, row: 4 + Math.floor(i / 2), col: 3 + (i % 2) }
+        : { id, row: 6, col: 1 + (i - 6) }
+    )),
   } as DesktopIconLayout;
 }
 
