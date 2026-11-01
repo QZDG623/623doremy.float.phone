@@ -59,8 +59,10 @@ android {
         // 1.0.36：稳定性——WebView 渲染进程崩溃自动重建、侧滑返回交给网页处理；
         //         感知新增设备运动/环境噪音/当前在看什么/屏幕与各 App 使用时长；
         //         截屏新增读整屏文字、自主回复与字幕气泡。
-        versionCode 35
-        versionName "1.0.36"
+        // 1.0.37：站点切回 Vercel（https://623doremy-float-phone.vercel.app），
+        //         与 1.0.36 的功能相同，仅加载的网页地址不同。
+        versionCode 36
+        versionName "1.0.37"
         buildConfigField "String", "SITE_URL", "\"${siteUrl}\""
     }
 
