@@ -61,8 +61,10 @@ android {
         //         截屏新增读整屏文字、自主回复与字幕气泡。
         // 1.0.37：站点切回 Vercel（https://623doremy-float-phone.vercel.app），
         //         与 1.0.36 的功能相同，仅加载的网页地址不同。
-        versionCode 36
-        versionName "1.0.37"
+        // 1.0.38：看屏回复改逐句气泡、气泡贴着悬浮球跟随；悬浮球思考时呼吸；
+        //         新增收藏夹 App；感知新增「连续用太久强制回小手机 / 锁定」。
+        versionCode 37
+        versionName "1.0.38"
         buildConfigField "String", "SITE_URL", "\"${siteUrl}\""
     }
 

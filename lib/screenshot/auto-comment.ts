@@ -23,11 +23,12 @@ import { loadChatMessages, loadChatSessions } from "../chat-storage";
 import { requestBackgroundChatReply } from "../follow-up-service";
 import {
   readScreenText,
-  showSubtitle,
+  setBallThinking,
   startScreenTicker,
   stopScreenTicker,
   supportsScreenTicker,
 } from "./bridge";
+import { speakInBubbles } from "./character-bubble";
 import { loadScreenshotConfig } from "./config";
 
 /** 本次「开启自主回复」以来已经自动说了几轮。关闭/重开时清零。 */
@@ -80,14 +81,13 @@ function pickSessionId(): string | null {
   }
 }
 
-/** 把模型回复清理成适合字幕气泡的一行（去标记、压空白、限长）。 */
-function toSubtitleText(content: string): string {
-  const cleaned = content
+/** 把模型回复清理成气泡可用的文本（去标记、压空白；不截断，交给逐句播放）。 */
+function toBubbleText(content: string): string {
+  return content
     .replace(/```[\s\S]*?```/g, "")
     .replace(/[#*_>`]/g, "")
     .replace(/\s+/g, " ")
     .trim();
-  return cleaned.slice(0, 120);
 }
 
 /**
@@ -114,10 +114,14 @@ export async function handleScreenTick(): Promise<void> {
 
   busy = true;
   const startedAt = Date.now();
+  // 看屏思考期间让悬浮球呼吸：用户能看出「角色真的在看屏」，
+  // 而不是盯着一个毫无反应的球猜它到底有没有在工作。
+  setBallThinking(true);
   try {
-    const note = `（你这会儿顺手看到 TA 手机屏幕上的内容：${screen.text.slice(0, 1200)}。`
-      + "如果你正好有感觉，就随口说一句像陪在旁边看到时的反应——"
-      + "别复述屏幕内容、别列清单、一两句话就够。不想说就保持安静。）";
+    const note = `（你刚瞥了一眼 TA 手机屏幕上的内容：${screen.text.slice(0, 1200)}。`
+      + "请你作为陪在旁边的人，就这块屏幕上**具体的东西**主动说一两句（比如正在看的剧名/集数、"
+      + "刷到的内容、页面上的字）。必须提到你看到的实际内容，不要自说自话，也不要说与屏幕无关的事。"
+      + "用两到三句口语短句，不要列表、不要复述整屏文字。）";
     const result = await requestBackgroundChatReply(sessionId, { ephemeralSystemNote: note });
     if (!result.ok) return;
 
@@ -133,8 +137,10 @@ export async function handleScreenTick(): Promise<void> {
         && msg.content.trim().length > 0
       ));
       if (latest) {
-        const text = toSubtitleText(latest.content);
-        if (text) showSubtitle(text, 7000);
+        const text = toBubbleText(latest.content);
+        // 逐句播放：每句完整出现、停留、消失，再出下一句。
+        // 不在这里限长——截断正是之前「只能看到一句话」的原因。
+        if (text) await speakInBubbles(text);
       }
     }
 
@@ -145,6 +151,7 @@ export async function handleScreenTick(): Promise<void> {
   } catch {
     // 读屏/生成失败：这一轮跳过，不写任何聊天记录
   } finally {
+    setBallThinking(false);
     busy = false;
   }
 }

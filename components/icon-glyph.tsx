@@ -39,6 +39,7 @@ import {
   mdiBridge,
   mdiHammerWrench,
   mdiGlassCocktail,
+  mdiArchiveOutline,
   mdiStorefrontOutline,
 } from "@mdi/js";
 
@@ -67,6 +68,7 @@ const MDI_PATHS: Record<IconId, string> = {
   worldbuilder: mdiEarth,
   qa: mdiHammerWrench,
   mixology: mdiGlassCocktail,
+  archive: mdiArchiveOutline,
   vnplay: mdiPlayCircle,
   vnchapters: mdiBookmark,
   moments: mdiCamera,

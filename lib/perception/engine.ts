@@ -568,6 +568,47 @@ const NO_TALK_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 let lastNoTalkCheckAt = 0;
 
 /**
+ * 让角色用气泡说一句（被冷落 / 久坐提醒），同时把这句话写进最近的私聊。
+ *
+ * 复用看屏自主回复的那一条链路（后台回复 → 最新一条 → 逐句气泡），
+ * 不另造一套生成逻辑：语气、上下文、限流都已经在那边打磨过。
+ *
+ * 任何一步失败都静默：这是附加表现，不能让感知采样被拖住或报错。
+ * 用 void 调用而不是 await——模型生成可能要几十秒，采样循环不能被它卡住。
+ */
+function speakEmotionBubble(note: string): void {
+  void (async () => {
+    try {
+      const { chatDb } = await import("../chat-db");
+      const sessions = await chatDb.sessions.toArray();
+      const latest = sessions
+        .filter(session => !session.isGroup && session.updatedAt)
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+      if (!latest) return;
+
+      const { requestBackgroundChatReply } = await import("../follow-up-service");
+      const { loadChatMessages } = await import("../chat-storage");
+      const { speakInBubbles } = await import("../screenshot/character-bubble");
+
+      const startedAt = Date.now();
+      const result = await requestBackgroundChatReply(latest.id, { ephemeralSystemNote: note });
+      if (!result.ok) return;
+
+      const messages = loadChatMessages(latest.id, 10);
+      const reply = [...messages].reverse().find(message => (
+        message.role === "assistant"
+        && new Date(message.createdAt).getTime() >= startedAt
+        && typeof message.content === "string"
+        && message.content.trim().length > 0
+      ));
+      if (reply) await speakInBubbles(reply.content);
+    } catch {
+      // 静默：没生成出来就当这一轮没发生
+    }
+  })();
+}
+
+/**
  * 很久没聊天。
  *
  * 「说话」按**任意一方**最后一条消息算（会话的 updatedAt）：是真正的双向沉默，
@@ -611,7 +652,16 @@ async function checkNoTalk(config: PerceptionConfig, state: PerceptionRuntimeSta
     type: "很久没聊天",
     payload: `已经 ${Math.floor(gapHours)} 小时没说话了`,
   }, state);
-  if (delivered) state.dailySignalDate[DAILY_KEY_NO_TALK] = today;
+  if (delivered) {
+    state.dailySignalDate[DAILY_KEY_NO_TALK] = today;
+    // 信号投递成功后，让角色用气泡表达「被冷落」的小情绪。
+    // 与聊天里的回复共用同一段生成，避免「只有流水、没人说话」的空落感。
+    speakEmotionBubble(
+      `（TA 已经 ${Math.floor(gapHours)} 小时没和你说过话了。`
+      + "请以你自己的性格主动说两句话，表达有点被冷落、想 TA 回来说说话的小情绪；"
+      + "不要指责、不要长篇，两到三句口语短句。）",
+    );
+  }
 }
 
 /**
@@ -700,7 +750,15 @@ async function checkSitStill(
     type: "久坐不动",
     payload: `已经 ${minutes} 分钟没怎么动了`,
   }, state);
-  if (delivered) state.sitReported = true;
+  if (delivered) {
+    state.sitReported = true;
+    // 用气泡提醒起来活动一下，而不是只在流水里记一笔。
+    speakEmotionBubble(
+      `（TA 已经 ${minutes} 分钟没怎么动了，可能一直坐着。`
+      + "请主动说两句话提醒 TA 起来活动一下，语气自然、像身边人的关心，"
+      + "不要像健康 App 的提示，两到三句口语短句。）",
+    );
+  }
 }
 
 /** 两个坐标之间的大致距离（米）。用等距圆柱近似——几百米到几公里量级足够。 */

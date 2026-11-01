@@ -88,6 +88,7 @@ import {
   type StoryOwnerType,
 } from "@/lib/story-storage";
 import { createOrGetSession, hydrateChatStorage, loadChatMessages, loadChatSessions, markChatSessionRead, pushChatMessage } from "@/lib/chat-storage";
+import { addArchiveEntry } from "@/lib/archive-storage";
 import { flattenCompletionResult, generateChatCompletion } from "@/lib/chat-engine";
 import { generateGroupChatCompletion } from "@/lib/group-chat-engine";
 import { parseAIResponse } from "@/lib/rich-message-parser";
@@ -2156,6 +2157,23 @@ export function StoryApp({ onClose }: StoryAppProps) {
                             >
                               <div style={{ display: "flex" }}>
                                 <button onClick={() => handleStoryCopy(message.rawContent)} className="story-ctx-btn">复制</button>
+                                <button onClick={() => {
+                                  // 快照式收藏：存当时的正文与角色，原消息后来被删也还在
+                                  const text = (message.renderedContent || message.rawContent || "").trim();
+                                  if (!text) return;
+                                  addArchiveEntry({
+                                    kind: "story",
+                                    characterId: activeCharacterId,
+                                    characterName: storyDisplayName,
+                                    characterAvatar: currentCharacter?.avatar || undefined,
+                                    sourceId: message.id,
+                                    sessionId: message.sessionId,
+                                    text,
+                                    createdAt: message.createdAt,
+                                    auto: false,
+                                  });
+                                  setActiveMessageId(null);
+                                }} className="story-ctx-btn">收藏</button>
                                 <button onClick={() => handleStoryEditStart(message)} className="story-ctx-btn">编辑</button>
                                 {(message.role === "assistant" || message.role === "user") && (
                                   <button onClick={() => { void handleStoryRetry(message.id); }} className="story-ctx-btn story-ctx-btn-danger">重试</button>

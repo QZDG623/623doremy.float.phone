@@ -18,6 +18,8 @@ import android.os.IBinder
 import android.os.Looper
 import android.util.Base64
 import android.util.TypedValue
+import android.animation.ValueAnimator
+import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -229,6 +231,33 @@ class ScreenshotBallService : Service() {
             .put("accessibilityOn", ScreenshotBridge.isAccessibilityOn())
             .put("running", running)
             .toString()
+
+        /**
+         * 让球进入/退出「呼吸」状态（透明度慢慢变淡再变回原色）。
+         *
+         * 网页在角色看屏/说话时调用：用户据此知道角色真的在看，而不是盯着
+         * 一个毫无反应的球猜。没有实例（球没开）时静默忽略。
+         */
+        fun setThinking(on: Boolean) {
+            liveInstance?.setThinkingNow(on)
+        }
+
+        /**
+         * 球当前的位置快照，给字幕气泡定位用。
+         *
+         * 返回 {x,y,diameter,screenW,screenH}（像素，屏幕左上角为原点）；
+         * 球没显示时返回 null——气泡这时退回固定顶部，不凭空编一个位置。
+         */
+        fun ballSnapshot(): JSONObject? {
+            val instance = liveInstance ?: return null
+            if (instance.ballView == null) return null
+            return JSONObject()
+                .put("x", instance.posX)
+                .put("y", instance.posY)
+                .put("diameter", instance.diameterPx)
+                .put("screenW", instance.resources.displayMetrics.widthPixels)
+                .put("screenH", instance.resources.displayMetrics.heightPixels)
+        }
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -236,9 +265,20 @@ class ScreenshotBallService : Service() {
     private var ballView: View? = null
 
     /** 当前位置（px，相对屏幕左上角）。 */
+    @Volatile
     private var posX = 0
+
+    @Volatile
     private var posY = 0
+
+    @Volatile
     private var diameterPx = 0
+
+    /** 角色是否正在看屏/说话（呼吸动画状态）。 */
+    @Volatile
+    private var thinking = false
+
+    private var breatheAnimator: ValueAnimator? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -262,6 +302,8 @@ class ScreenshotBallService : Service() {
         ballView = null
         diameterPx = dp(ballDiameterDp)
         showBall()
+        // 重画会换掉整个 View，旧的呼吸动画跟着失效；正在「思考」就接着呼吸。
+        if (thinking) startBreathing()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -460,6 +502,40 @@ class ScreenshotBallService : Service() {
         params.x = posX
         params.y = posY
         runCatching { windowManager.updateViewLayout(view, params) }
+        // 气泡挂在球旁边：球动了，气泡也得跟着挪，否则会出现
+        // 「球已经拖到另一边，气泡还留在原地」的割裂感。
+        ScreenshotBridge.onBallMoved()
+    }
+
+    /** 呼吸动画：透明度在原色与半透明之间缓慢起伏，表示角色正在看屏。 */
+    private fun setThinkingNow(on: Boolean) {
+        main.post {
+            if (thinking == on) return@post
+            thinking = on
+            if (on) startBreathing() else stopBreathing()
+        }
+    }
+
+    private fun startBreathing() {
+        stopBreathing()
+        val view = ballView ?: return
+        val animator = ValueAnimator.ofFloat(1f, 0.35f).apply {
+            duration = 1600
+            repeatMode = ValueAnimator.REVERSE
+            repeatCount = ValueAnimator.INFINITE
+            interpolator = AccelerateDecelerateInterpolator()
+            addUpdateListener { animation ->
+                view.alpha = animation.animatedValue as Float
+            }
+        }
+        animator.start()
+        breatheAnimator = animator
+    }
+
+    private fun stopBreathing() {
+        breatheAnimator?.cancel()
+        breatheAnimator = null
+        ballView?.alpha = 1f
     }
 
     /**
@@ -506,6 +582,8 @@ class ScreenshotBallService : Service() {
     private fun teardown() {
         running = false
         if (liveInstance === this) liveInstance = null
+        stopBreathing()
+        thinking = false
         ballView?.let { view -> runCatching { windowManager.removeView(view) } }
         ballView = null
         stopForeground(true)

@@ -13,6 +13,7 @@ import android.util.Base64
 import android.util.TypedValue
 import android.view.Display
 import android.view.Gravity
+import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.TextView
@@ -360,6 +361,10 @@ object ScreenshotBridge {
     /**
      * 显示一条字幕气泡。durationMs <= 0 表示常驻，直到 hideSubtitle()。
      *
+     * 位置规则：**贴在悬浮球旁边**（球在上半屏就放球下方、下半屏放球上方，
+     * 球的水平中心偏右就把气泡放左边，反之放右边），并垂直居中于球。
+     * 球不显示时才退回固定的顶部居中——这时没有参照物，固定位置最稳。
+     *
      * @return 是否已交给主线程去挂窗口（服务没开时直接 false）。
      */
     fun showSubtitle(text: String, durationMs: Int): Boolean {
@@ -370,6 +375,8 @@ object ScreenshotBridge {
                 val existing = subtitleView
                 if (existing != null) {
                     existing.text = text
+                    // 换句后宽度会变：重新量一次并贴回球旁边，否则气泡会飘在半空
+                    repositionSubtitle(svc, existing)
                     scheduleHide(durationMs)
                     return@post
                 }
@@ -384,21 +391,9 @@ object ScreenshotBridge {
                         cornerRadius = dp(18).toFloat()
                         setColor(0xE6202028.toInt())
                     }
-                    maxWidth = (svc.resources.displayMetrics.widthPixels * 0.86f).toInt()
                     elevation = dp(6).toFloat()
                 }
-                val params = WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.WRAP_CONTENT,
-                    WindowManager.LayoutParams.WRAP_CONTENT,
-                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                        or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                        or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                    PixelFormat.TRANSLUCENT,
-                ).apply {
-                    gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                    y = dp(92)
-                }
+                val params = buildSubtitleParams(svc, view)
                 val wm = svc.getSystemService(Context.WINDOW_SERVICE) as WindowManager
                 wm.addView(view, params)
                 subtitleView = view
@@ -408,6 +403,82 @@ object ScreenshotBridge {
             }
         }
         return true
+    }
+
+    /**
+     * 计算气泡的窗口参数：优先贴球，拿不到球的位置再退回顶部居中。
+     *
+     * 之所以要 view.measure()：WRAP_CONTENT 的宽度只有量过才知道，
+     * 而「放在球左边还是右边」必须知道气泡自己多宽才不越界。
+     */
+    private fun buildSubtitleParams(
+        svc: AccessibilityService,
+        view: TextView,
+    ): WindowManager.LayoutParams {
+        val metrics = svc.resources.displayMetrics
+        val maxWidth = (metrics.widthPixels * 0.86f).toInt()
+        view.maxWidth = maxWidth
+        view.measure(
+            View.MeasureSpec.makeMeasureSpec(maxWidth, View.MeasureSpec.AT_MOST),
+            View.MeasureSpec.makeMeasureSpec(metrics.heightPixels, View.MeasureSpec.AT_MOST),
+        )
+        val width = view.measuredWidth.coerceAtLeast(1)
+        val height = view.measuredHeight.coerceAtLeast(1)
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT,
+        )
+
+        val ball = runCatching { ScreenshotBallService.ballSnapshot() }.getOrNull()
+        if (ball != null) {
+            val ballX = ball.optInt("x", 0)
+            val ballY = ball.optInt("y", 0)
+            val ballD = ball.optInt("diameter", 0)
+            val screenW = ball.optInt("screenW", metrics.widthPixels)
+            val screenH = ball.optInt("screenH", metrics.heightPixels)
+            val gap = dp(10)
+            val margin = dp(8)
+
+            // 水平：球偏右 → 气泡放球左边；球偏左 → 放球右边。
+            // 两边都放不下时（球太大/气泡太宽），退而求其次夹在屏幕内。
+            val leftSide = ballX + ballD / 2 > screenW / 2
+            val rawX = if (leftSide) ballX - width - gap else ballX + ballD + gap
+            val x = rawX.coerceIn(margin, maxOf(margin, screenW - width - margin))
+            // 垂直：与球的中线对齐，再夹在屏幕内。
+            val rawY = ballY + (ballD - height) / 2
+            val y = rawY.coerceIn(margin, maxOf(margin, screenH - height - margin))
+
+            params.gravity = Gravity.TOP or Gravity.START
+            params.x = x
+            params.y = y
+        } else {
+            params.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            params.x = 0
+            params.y = dp(92)
+        }
+        return params
+    }
+
+    /** 球移动后把正在显示的气泡跟着挪过去。 */
+    fun onBallMoved() {
+        mainHandler.post {
+            val view = subtitleView ?: return@post
+            val svc = service ?: return@post
+            repositionSubtitle(svc, view)
+        }
+    }
+
+    private fun repositionSubtitle(svc: AccessibilityService, view: TextView) {
+        runCatching {
+            val wm = svc.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            wm.updateViewLayout(view, buildSubtitleParams(svc, view))
+        }
     }
 
     private fun scheduleHide(durationMs: Int) {

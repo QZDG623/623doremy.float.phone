@@ -25,6 +25,7 @@ type ScreenshotBridgeLike = {
   readScreenText?: () => string;
   showSubtitle?: (text: string, durationMs: number) => boolean;
   hideSubtitle?: () => void;
+  setScreenshotBallThinking?: (thinking: boolean) => void;
   startScreenTicker?: (seconds: number) => void;
   stopScreenTicker?: () => void;
 };
@@ -110,6 +111,20 @@ export function showSubtitle(text: string, durationMs = 6000): boolean {
     return bridge()?.showSubtitle?.(text, durationMs) === true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * 让悬浮球进入/退出「呼吸」状态。
+ *
+ * 呼吸是「角色正在看屏/正在说话」的提示：球慢慢变淡再变回原色。
+ * 老壳没有这个方法时静默忽略（球只是不呼吸，其它照常）。
+ */
+export function setBallThinking(thinking: boolean): void {
+  try {
+    bridge()?.setScreenshotBallThinking?.(thinking);
+  } catch {
+    /* 忽略 */
   }
 }
 

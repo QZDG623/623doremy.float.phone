@@ -857,6 +857,121 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
                 </div>
               </div>
 
+              {/* 用太久强制拦一下 */}
+              <div>
+                <div className="settings-menu-section-title">用太久强制拦一下</div>
+                <div className="menu-group" style={{ marginTop: 10 }}>
+                  <div className="per-field" style={{ alignItems: "center" }}>
+                    <div className="per-field-body">
+                      <div className="per-field-label">连续用太久就处置</div>
+                      <div className="per-field-hint">
+                        同一个应用连续用满设定时长后，由安卓壳直接动手——切到别的 App 后网页会被冻结，
+                        只有在原生计时才拦得住
+                      </div>
+                    </div>
+                    <Toggle
+                      checked={config.overuseMinutes > 0}
+                      onChange={(v: boolean) => updatePassive({ overuseMinutes: v ? 30 : 0 })}
+                    />
+                  </div>
+                  {config.overuseMinutes > 0 && (
+                    <>
+                      <div className="per-field">
+                        <div className="per-field-body">
+                          <div className="per-field-label">连续用满多少分钟</div>
+                          <div className="per-field-hint">中途切到别的应用会重新计时；0 = 关</div>
+                        </div>
+                        <input
+                          className="per-field-input"
+                          type="number"
+                          min={0}
+                          max={720}
+                          value={config.overuseMinutes}
+                          onChange={e => updatePassive({ overuseMinutes: Math.max(0, Number(e.target.value) || 0) })}
+                        />
+                      </div>
+                      <div className="per-field" style={{ alignItems: "flex-start" }}>
+                        <div className="per-field-body">
+                          <div className="per-field-label">怎么处置</div>
+                          <div className="per-field-hint">
+                            回小手机 = 直接把小手机切回前台；锁定 = 全屏遮罩挡住该应用，只留「回小手机」
+                          </div>
+                          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                            <button
+                              type="button"
+                              className={`ui-btn ${config.overuseAction === "return" ? "ui-btn-primary" : "ui-btn-outline"}`}
+                              onClick={() => updatePassive({ overuseAction: "return" })}
+                            >
+                              回小手机
+                            </button>
+                            <button
+                              type="button"
+                              className={`ui-btn ${config.overuseAction === "lock" ? "ui-btn-primary" : "ui-btn-outline"}`}
+                              onClick={() => updatePassive({ overuseAction: "lock" })}
+                            >
+                              强行锁定
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="per-field" style={{ alignItems: "flex-start" }}>
+                        <div className="per-field-body">
+                          <div className="per-field-label">要管的应用</div>
+                          <div className="per-field-hint">
+                            显示名或包名的包含匹配（不区分大小写）。留空 = 除小手机外的所有应用
+                          </div>
+                          {config.overuseApps.map((keyword, idx) => (
+                            <div key={idx} style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 8 }}>
+                              <input
+                                className="per-field-input"
+                                style={{ flex: 1, minWidth: 0 }}
+                                placeholder="应用名或包名，如 抖音"
+                                value={keyword}
+                                onChange={e => updatePassive({
+                                  overuseApps: config.overuseApps.map((k, i) => i === idx ? e.target.value : k),
+                                })}
+                              />
+                              <button
+                                type="button"
+                                className="ui-btn ui-btn-soft-danger"
+                                onClick={() => updatePassive({
+                                  overuseApps: config.overuseApps.filter((_, i) => i !== idx),
+                                })}
+                              >
+                                <Trash2 size={14} strokeWidth={2} />
+                              </button>
+                            </div>
+                          ))}
+                          <button
+                            type="button"
+                            className="ui-btn ui-btn-outline"
+                            style={{ marginTop: 8 }}
+                            onClick={() => updatePassive({ overuseApps: [...config.overuseApps, ""] })}
+                          >
+                            <Plus size={14} strokeWidth={2} /> 添加应用
+                          </button>
+                        </div>
+                      </div>
+                      <div className="per-field">
+                        <div className="per-field-body">
+                          <div className="per-field-label">遮罩上说什么</div>
+                          <div className="per-field-hint">选「强行锁定」时这句话会显示在全屏遮罩上</div>
+                        </div>
+                        <input
+                          className="per-field-input"
+                          style={{ width: 140 }}
+                          value={config.overuseMessage}
+                          onChange={e => updatePassive({ overuseMessage: e.target.value })}
+                        />
+                      </div>
+                    </>
+                  )}
+                </div>
+                <div className="per-note" style={{ padding: "0 var(--ui-padding, 16px)" }}>
+                  与上面「应用停留时长」的区别：那条只是产生一个信号，交给现实桥；这条是原生真的动手拦。
+                </div>
+              </div>
+
               {/* 角色怎么看到 */}
               <div>
                 <div className="settings-menu-section-title">角色怎么看到这些</div>

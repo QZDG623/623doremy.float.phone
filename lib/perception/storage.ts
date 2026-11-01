@@ -122,6 +122,15 @@ export function loadPerceptionConfig(): PerceptionConfig {
       sleepLockMessage: typeof parsed.sleepLockMessage === "string" && parsed.sleepLockMessage.trim()
         ? parsed.sleepLockMessage.trim().slice(0, 80)
         : PERCEPTION_DEFAULTS.sleepLockMessage,
+      // 「用太久强制拦一下」四项。
+      // overuseAction 是联合类型，只要不是 "lock" 就退回 "return"——
+      // 存储被手改成别的词时不能让原生读到不认识的动作。
+      overuseMinutes: clamp(parsed.overuseMinutes, PERCEPTION_LIMITS.overuseMinutes.min, PERCEPTION_LIMITS.overuseMinutes.max, PERCEPTION_DEFAULTS.overuseMinutes),
+      overuseAction: parsed.overuseAction === "lock" ? "lock" : "return",
+      overuseApps: sanitizeKeywords(parsed.overuseApps),
+      overuseMessage: typeof parsed.overuseMessage === "string" && parsed.overuseMessage.trim()
+        ? parsed.overuseMessage.trim().slice(0, 80)
+        : PERCEPTION_DEFAULTS.overuseMessage,
     };
   } catch {
     return { ...PERCEPTION_DEFAULTS };

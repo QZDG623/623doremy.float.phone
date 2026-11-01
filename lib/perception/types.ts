@@ -197,6 +197,19 @@ export type PerceptionConfig = {
   sleepLockApps: string[];
   /** 遮罩上的那句话。 */
   sleepLockMessage: string;
+  /**
+   * 同一个应用连续用满多少分钟就强制处置（回小手机 / 全屏锁定）。0 = 关。
+   *
+   * 与「应用停留时长」的区别：那条只是产生一个信号；这条是**真的动手**，
+   * 由原生守卫执行——网页切到别的 App 后会被冻结，等网页来拦就来不及了。
+   */
+  overuseMinutes: number;
+  /** 命中后做什么：return = 拉回小手机；lock = 全屏遮罩锁住该应用。 */
+  overuseAction: "return" | "lock";
+  /** 要管的应用（显示名或包名包含匹配）。空数组 = 除小手机外的所有应用。 */
+  overuseApps: string[];
+  /** 锁定/拉回遮罩上的那句话。 */
+  overuseMessage: string;
 };
 
 export const PERCEPTION_DEFAULTS: PerceptionConfig = {
@@ -228,6 +241,10 @@ export const PERCEPTION_DEFAULTS: PerceptionConfig = {
   sleepLockEnd: "07:00",
   sleepLockApps: [],
   sleepLockMessage: "该睡觉啦，把手机放下，明天再玩。",
+  overuseMinutes: 0,
+  overuseAction: "return",
+  overuseApps: [],
+  overuseMessage: "这个应用用太久了，先回小手机歇一会儿吧。",
 };
 
 export const PERCEPTION_LIMITS = {
@@ -247,6 +264,8 @@ export const PERCEPTION_LIMITS = {
   queryCooldownMinutes: { min: 0, max: 720 },
   bedtimeHour: { min: -1, max: 23 },
   bedtimeMinute: { min: 0, max: 59 },
+  // 允许 0：那是「不强制拦应用」的合法取值
+  overuseMinutes: { min: 0, max: 720 },
 } as const;
 
 /** 一条待投递的感知信号。type 直接写成人类可读的事件名，规则里 matchType 就能匹配。 */

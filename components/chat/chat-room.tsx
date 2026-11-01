@@ -4,6 +4,7 @@ import { forwardRef, Fragment, memo, useCallback, useEffect, useImperativeHandle
 import { ChatSession, ChatMessage, CHAT_APP_SETTINGS_UPDATED_EVENT, CHAT_INITIAL_VISIBLE_MESSAGE_COUNT, CHAT_LOAD_MORE_MESSAGE_COUNT, CHAT_REQUEST_REPLY_EVENT, loadChatAppSettings, loadChatMessages, loadChatContacts, loadChatSessions, saveChatSessions, pushChatMessage, updateChatMessage, deleteChatMessage, deleteChatMessagesFrom, deleteChatMessagesByIds, retractChatMessage, editChatMessage, updateMessageMediaData, replaceResponseBatchWithParts, replaceGroupResponseRound, isReadingDiscussMessage, isSystemInstructionMessage, getSystemInstructionDisplayContent, createResponseBatchId, createResponseRoundId, getLatestStateValues, getLatestCharacterStateValues, compareChatMessages, isSessionStreamingEnabled, resolveChatBackgroundImage, resolveChatUserAvatar } from "@/lib/chat-storage";
 import { cleanStreamText, splitStreamPreviewSegments, stripLiteralTexts, stripXmlTagBlocks } from "@/lib/stream-preview";
 import type { StateValue } from "@/lib/chat-storage";
+import { addArchiveEntry } from "@/lib/archive-storage";
 import { parseStateValues, mergeStateValues } from "@/lib/state-value-parser";
 import { parseAIResponse, isNonDialogueOnlyContent, type ParsedMessagePart } from "@/lib/rich-message-parser";
 import { isKnownStickerLabel } from "@/lib/sticker-data";
@@ -5162,6 +5163,38 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         showChatToast(marking ? "已标记为通话开头" : "已取消通话开头标记");
     }, [session.id, syncMessagesFromStorage]);
 
+    /**
+     * 收藏一条聊天记录 / 语音 / 图片到收藏夹。
+     *
+     * 存的是**快照**（正文、媒体地址、角色信息），所以原消息后来被删或编辑，
+     * 收藏依然完整。语音与图片如果连正文都没有，用一句占位让档案里不出现空白。
+     */
+    const handleArchiveMessage = (m: ChatMessage) => {
+        const kind = m.mediaType === "audio" ? "voice" : m.mediaType === "image" ? "image" : "chat";
+        const rawText = m.mediaType === "audio" || m.mediaType === "image"
+            ? (m.mediaData?.label || m.content || "").trim()
+            : m.content;
+        const text = rawText || (kind === "voice" ? "[语音]" : kind === "image" ? "[图片]" : "");
+        if (!text) return;
+        const storedId = getStoredActionMessageId(m);
+        const added = addArchiveEntry({
+            kind,
+            characterId: session.contactId,
+            characterName: character?.name || session.alias || "角色",
+            characterAvatar: character?.avatar || undefined,
+            sourceId: storedId,
+            sessionId: session.id,
+            text,
+            mediaUrl: m.mediaUrl,
+            createdAt: m.createdAt,
+            auto: false,
+        });
+        showChatToast(added
+            ? (kind === "voice" ? "已收藏这条语音" : kind === "image" ? "已收藏这张图" : "已收藏这条聊天记录")
+            : "这条已经在收藏夹里了");
+        setActiveMessageId(null);
+    };
+
     /** Reusable context menu for user/assistant bubbles */
     const renderBubbleContextMenu = (m: ChatMessage, options?: { allowMultiSelect?: boolean }) => {
         const storedMessageId = getStoredActionMessageId(m);
@@ -5213,6 +5246,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 </div>
                 <div className="flex">
                     <button onClick={() => { setQuotingMessage(m); setActiveMessageId(null); }} className="ctx-menu-btn">引用</button>
+                    <button onClick={() => handleArchiveMessage(m)} className="ctx-menu-btn">收藏</button>
                     {options?.allowMultiSelect !== false && (
                         <button onClick={() => startMultiSelectFromMessage(m)} className="ctx-menu-btn">多选</button>
                     )}

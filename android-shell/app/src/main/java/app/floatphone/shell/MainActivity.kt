@@ -63,7 +63,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         val SITE_URL: String = BuildConfig.SITE_URL
-        const val VERSION = "1.0.37"
+        const val VERSION = "1.0.38"
         /** 来电接听等场景的站内深链（必须以 SITE_URL 开头，否则忽略） */
         const val EXTRA_OPEN_URL = "open_url"
         /** 外部 App（如桌宠）唤起本壳用的自定义 scheme：floatshell://open?url=<站内地址> */
@@ -1297,6 +1297,15 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun hideSubtitle() {
             ScreenshotBridge.hideSubtitle()
+        }
+
+        /**
+         * 让悬浮球进入/退出「呼吸」状态（透明度慢慢变淡再变回原色）。
+         * 网页在角色看屏思考、逐句说话期间调用，用来告诉用户「它正在看」。
+         */
+        @JavascriptInterface
+        fun setScreenshotBallThinking(thinking: Boolean) {
+            ScreenshotBallService.setThinking(thinking)
         }
 
         /**

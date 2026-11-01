@@ -46,6 +46,12 @@ export function syncAppGuardToNative(config: PerceptionConfig): void {
       sleepLockEnd: config.sleepLockEnd,
       sleepLockApps: config.sleepLockApps,
       sleepLockMessage: config.sleepLockMessage,
+      // 连续用满多久强制处置。0 = 关；动作只有 return / lock 两种，
+      // 由原生按上面的列表（空 = 除小手机外所有应用）判定。
+      overuseMinutes: config.overuseMinutes,
+      overuseAction: config.overuseAction,
+      overuseApps: config.overuseApps,
+      overuseMessage: config.overuseMessage,
     }));
   } catch {
     // 桥异常绝不能让感知引擎启动失败
