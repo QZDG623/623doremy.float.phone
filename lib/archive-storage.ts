@@ -232,6 +232,35 @@ async function synthesizeVoiceAsset(characterId: string, text: string): Promise<
   }
 }
 
+/**
+ * 收藏里那条语音地址**现在还能不能播**。
+ *
+ * 旧收藏常常存着当年聊天里的 media-store:// 引用，那条音频后来被存储清理
+ * 删掉了，地址仍然留着——只看「有没有 mediaUrl」会误判成已修好，
+ * 界面就一直显示「语音文件已被清理」。这里真的去取一次。
+ */
+async function isVoiceRefAlive(raw?: string): Promise<boolean> {
+  const url = raw?.trim();
+  if (!url) return false;
+  if (url.startsWith("asset://")) {
+    try {
+      const { getChatAudioFromIndexedDB } = await import("./chat-asset-storage");
+      return Boolean(await getChatAudioFromIndexedDB(url.slice(8)));
+    } catch {
+      return false;
+    }
+  }
+  if (url.startsWith("media-store://")) {
+    try {
+      const { loadMediaBlob } = await import("./media-cache-storage");
+      return Boolean(await loadMediaBlob(url));
+    } catch {
+      return false;
+    }
+  }
+  return url.startsWith("data:") || url.startsWith("blob:") || url.startsWith("http");
+}
+
 export type ArchiveVoiceInput = {
   characterId: string;
   characterName: string;
@@ -251,22 +280,26 @@ export type ArchiveVoiceInput = {
 export async function archiveVoiceMessage(input: ArchiveVoiceInput): Promise<{ status: "added" | "exists"; playable: boolean }> {
   const store = loadStore();
   const existing = store.entries.find(entry => entry.kind === "voice" && entry.sourceId === input.sourceId);
-  // 已经收藏过且音频还在：不重复合成
-  if (existing?.mediaUrl) return { status: "exists", playable: true };
+  // 已经收藏过且那条音频**确实还能播**：不重复合成
+  if (existing?.mediaUrl && await isVoiceRefAlive(existing.mediaUrl)) {
+    return { status: "exists", playable: true };
+  }
 
   let mediaUrl = await durableVoiceUrl(input.mediaUrl);
+  // 原消息里的地址也可能已经失效：取不出来的音频不能当作「已收藏」
+  if (mediaUrl && !(await isVoiceRefAlive(mediaUrl))) mediaUrl = null;
   const speechText = input.text.trim();
   if (!mediaUrl && speechText && speechText !== "[语音]") {
     mediaUrl = await synthesizeVoiceAsset(input.characterId, speechText);
   }
 
-  // 旧条目只有文字（音频被清理过）：这次顺手补上音频，而不是只回一句「已收藏」
+  // 旧条目只有文字（或者存的地址已经失效）：这次顺手补上音频，而不是只回一句「已收藏」
   if (existing) {
     if (mediaUrl) {
       existing.mediaUrl = mediaUrl;
       saveStore(store);
     }
-    return { status: "exists", playable: Boolean(existing.mediaUrl) };
+    return { status: "exists", playable: Boolean(mediaUrl) };
   }
 
   addArchiveEntry({
@@ -291,13 +324,26 @@ export async function archiveVoiceMessage(input: ArchiveVoiceInput): Promise<{ s
 export async function hydrateArchiveVoiceMedia(limit = 4): Promise<number> {
   const store = loadStore();
   let updated = 0;
+  let inspected = 0;
+  // 只检查最近的若干条：老收藏多半没人翻，不必每次打开都逐条验一遍。
+  const maxInspect = limit + 6;
   for (const entry of store.entries) {
-    if (updated >= limit) break;
-    if (entry.kind !== "voice" || entry.mediaUrl) continue;
+    if (updated >= limit || inspected >= maxInspect) break;
+    if (entry.kind !== "voice") continue;
+    inspected += 1;
+    // 地址可能还在、但音频早被清理了：真的取一次再决定要不要重合成
+    if (entry.mediaUrl && await isVoiceRefAlive(entry.mediaUrl)) continue;
     const text = entry.text?.trim();
     if (!text || text === "[语音]") continue;
     const mediaUrl = await synthesizeVoiceAsset(entry.characterId, text);
-    if (!mediaUrl) continue;
+    if (!mediaUrl) {
+      // 合成也失败：把失效地址清掉，界面至少不会一直说「已被清理」
+      if (entry.mediaUrl) {
+        entry.mediaUrl = undefined;
+        updated += 1;
+      }
+      continue;
+    }
     entry.mediaUrl = mediaUrl;
     updated += 1;
   }

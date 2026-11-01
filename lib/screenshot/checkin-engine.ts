@@ -15,11 +15,14 @@
 //  - **失败如实说**：没能截图时写的是「截屏失败」而不是「对方没给看」，
 //    免得角色误以为用户拒绝、做出委屈的反应。
 
-import { pushChatMessage, loadChatSessions } from "../chat-storage";
+import { pushChatMessage, loadChatMessages, loadChatSessions } from "../chat-storage";
 import { loadCharacters } from "../character-storage";
 import { recordUserShot } from "./engine";
 import { requestBackgroundChatReply } from "../follow-up-service";
 import { storeMediaBase64 } from "../media-cache-storage";
+import { setBallThinking } from "./bridge";
+import { speakInBubbles } from "./character-bubble";
+import { loadScreenshotConfig } from "./config";
 import {
   loadCharacterCheckIn,
   loadCheckInConfig,
@@ -29,6 +32,7 @@ import {
   type CheckInCharacterConfig,
 } from "./checkin-config";
 import { consumePendingUserShot, hasCheckInBridge, readCheckInCapabilities, requestCheckIn } from "./checkin";
+import type { CheckInOutcome } from "./types";
 import { resolveCheckInGuidance } from "./checkin-guidance";
 import { ensureShellOverlayListener, subscribeShellOverlayEvents } from "../shell-call-overlay";
 
@@ -221,10 +225,40 @@ export async function deliverUserShot(outcome: CheckInOutcome): Promise<{ ok: bo
       mediaUrl: record.ref,
       mediaData: { label: "给你看看我现在这边" },
     });
-    void requestBackgroundChatReply(sessionId).catch(() => undefined);
+    void respondToUserShot(sessionId);
     return { ok: true };
   } catch {
     return { ok: false, reason: "图片没能保存，这次没发出去" };
+  }
+}
+
+/**
+ * 图片发出去之后立刻让角色回一句，并把这句用气泡说出来。
+ *
+ * 以前这里只调 requestBackgroundChatReply：回复确实进了聊天，但用户大半
+ * 正在别的 App 里，看不到聊天界面，体感就是「发给它了、它没理我」。
+ * 所以这里把回复在原地用气泡呈现，同时在生成期间点亮悬浮球的呼吸状态，
+ * 用户能立刻看到「它正在想」→「它说话了」。
+ */
+async function respondToUserShot(sessionId: string): Promise<void> {
+  const startedAt = Date.now() - 1500;
+  const config = loadScreenshotConfig();
+  setBallThinking(true);
+  try {
+    const result = await requestBackgroundChatReply(sessionId);
+    if (!result.ok) return;
+    // 取这一轮刚存下的那条可见回复（可能分多条，说最后一条就够）
+    const messages = loadChatMessages(sessionId);
+    const reply = [...messages].reverse().find(message => (
+      message.role === "assistant"
+      && message.content?.trim()
+      && Date.parse(message.createdAt) >= startedAt
+    ));
+    if (reply && config.subtitleEnabled) await speakInBubbles(reply.content);
+  } catch {
+    // 失败就算了：聊天里会留下系统提示，气泡不硬凑
+  } finally {
+    setBallThinking(false);
   }
 }
 

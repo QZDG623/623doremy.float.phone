@@ -8,8 +8,8 @@
 //
 // 这一屏刻意做得像纸质档案：编号、色卡、贴纸，而不是又一个列表。
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { ChevronLeft, Image as ImageIcon, MessageSquareText, Mic, Trash2, BookOpenText } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ChevronLeft, Image as ImageIcon, MessageSquareText, Mic, Trash2, BookOpenText, Play, Pause } from "lucide-react";
 
 import {
   ARCHIVE_KIND_LABEL,
@@ -82,13 +82,57 @@ function ArchiveImage({ url }: { url?: string }) {
 
 function ArchiveVoice({ url, text }: { url?: string; text: string }) {
   const resolved = useResolvedMediaUrl(url);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [progress, setProgress] = useState(0);
+
+  useEffect(() => {
+    setPlaying(false);
+    setProgress(0);
+  }, [resolved]);
+
+  const toggle = () => {
+    const audio = audioRef.current;
+    if (!audio || !resolved) return;
+    if (audio.paused) {
+      void audio.play();
+    } else {
+      // 再点一下回到开头：语音收藏要的就是「一键重播」
+      audio.pause();
+      audio.currentTime = 0;
+      setProgress(0);
+    }
+  };
+
   return (
     <div className="arc-voice">
       {resolved ? (
-        <audio className="arc-voice-audio" controls preload="none" src={resolved} />
-      ) : (
+        <>
+          <button
+            type="button"
+            className={`arc-voice-play${playing ? " is-playing" : ""}`}
+            onClick={toggle}
+            aria-label={playing ? "停止播放" : "播放语音"}
+          >
+            {playing ? <Pause size={18} strokeWidth={2} /> : <Play size={18} strokeWidth={2} />}
+            <span className="arc-voice-progress" style={{ width: `${progress}%` }} />
+          </button>
+          <audio
+            ref={audioRef}
+            preload="metadata"
+            src={resolved}
+            onPlay={() => setPlaying(true)}
+            onPause={() => setPlaying(false)}
+            onEnded={() => { setPlaying(false); setProgress(0); }}
+            onTimeUpdate={event => {
+              const audio = event.currentTarget;
+              if (audio.duration > 0) setProgress((audio.currentTime / audio.duration) * 100);
+            }}
+          />
+        </>
+      ) : url ? (
         <span className="arc-voice-missing">语音文件已被清理</span>
-      )}
+      ) : null}
       {text ? <p className="arc-voice-text">{cleanVoiceDisplay(text)}</p> : null}
     </div>
   );
@@ -108,17 +152,26 @@ export function ArchiveApp({ onClose }: { onClose: () => void }) {
 
     let cancelled = false;
     let timer: number | undefined;
+    let running = false;
 
     // 打开时扫一次：收藏夹不该要求用户记得「先同步」。
-    // 同步图片（聊天/朋友圈/其他 App）与补旧语音音频一起跑。
+    // 两件事必须**依次**跑：图片同步会写收藏存储，补语音如果在它之前读了
+    // 旧快照、之后又整份写回，会把这批新图吞掉。
     const syncNow = () => {
-      if (cancelled) return;
+      if (cancelled || running) return;
+      running = true;
       setSyncing(true);
-      void Promise.all([syncGeneratedChatImages(), hydrateArchiveVoiceMedia()]).finally(() => {
-        if (cancelled) return;
-        setSyncing(false);
-        refresh();
-      });
+      void (async () => {
+        try {
+          await syncGeneratedChatImages();
+          await hydrateArchiveVoiceMedia();
+        } finally {
+          running = false;
+          if (cancelled) return;
+          setSyncing(false);
+          refresh();
+        }
+      })();
     };
 
     // 聊天/朋友圈刚生成了新图（生成是异步的，可能发生在收藏夹打开之后）：
@@ -366,7 +419,11 @@ const ARC_STYLES = `
 .arc-media-image{display:block;width:100%;max-height:340px;object-fit:contain;border-radius:10px;background:#f1eee8}
 .arc-media-placeholder{padding:26px 0;text-align:center;font-size:12px;opacity:.5;background:#f1eee8;border-radius:10px}
 .arc-voice{display:flex;flex-direction:column;gap:8px}
-.arc-voice-audio{width:100%;height:38px}
+.arc-voice-play{position:relative;display:inline-flex;align-items:center;justify-content:center;width:42px;height:42px;
+  border:none;border-radius:50%;background:#ece5f6;color:#5d4a7c;cursor:pointer;overflow:hidden;
+  transition:background .2s ease}
+.arc-voice-play.is-playing{background:#dccdf0}
+.arc-voice-progress{position:absolute;left:0;bottom:0;height:3px;width:0;background:#7b67a0;transition:width .2s linear}
 .arc-voice-text{margin:0;font-size:13px;line-height:1.6;white-space:pre-wrap}
 .arc-voice-missing{font-size:12px;opacity:.5}
 `;
