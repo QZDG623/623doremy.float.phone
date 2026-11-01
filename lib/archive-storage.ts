@@ -449,6 +449,10 @@ export async function syncGeneratedChatImages(): Promise<number> {
       }
       if (!characterId) continue;
 
+      // 生图消息的 mediaUrl 是一整段 base64，直接塞进收藏夹会把 kv 撑得很大；
+      // imageGenerationMediaRef 是同一张图的 media-store:// 引用，优先用它。
+      const durableUrl = message.mediaData?.imageGenerationMediaRef?.trim() || message.mediaUrl;
+
       pushImage({
         sourceId: message.id,
         characterId,
@@ -456,7 +460,7 @@ export async function syncGeneratedChatImages(): Promise<number> {
         characterAvatar,
         sessionId: session.id,
         text: message.mediaData?.label?.trim() || message.content?.trim() || "",
-        mediaUrl: message.mediaUrl,
+        mediaUrl: durableUrl,
         createdAt: message.createdAt,
       });
     }
