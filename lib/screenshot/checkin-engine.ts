@@ -241,18 +241,17 @@ export async function deliverUserShot(outcome: CheckInOutcome): Promise<{ ok: bo
  * 用户能立刻看到「它正在想」→「它说话了」。
  */
 async function respondToUserShot(sessionId: string): Promise<void> {
-  const startedAt = Date.now() - 1500;
   const config = loadScreenshotConfig();
+  // 记下生成前的消息集合：回复存进来后靠「新出现的 id」定位，不依赖时间戳
+  const knownIds = new Set(loadChatMessages(sessionId).map(message => message.id));
   setBallThinking(true);
   try {
     const result = await requestBackgroundChatReply(sessionId);
     if (!result.ok) return;
-    // 取这一轮刚存下的那条可见回复（可能分多条，说最后一条就够）
-    const messages = loadChatMessages(sessionId);
-    const reply = [...messages].reverse().find(message => (
+    const reply = [...loadChatMessages(sessionId)].reverse().find(message => (
       message.role === "assistant"
+      && !knownIds.has(message.id)
       && message.content?.trim()
-      && Date.parse(message.createdAt) >= startedAt
     ));
     if (reply && config.subtitleEnabled) await speakInBubbles(reply.content);
   } catch {
