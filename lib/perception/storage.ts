@@ -128,6 +128,7 @@ export function loadPerceptionConfig(): PerceptionConfig {
       overuseMinutes: clamp(parsed.overuseMinutes, PERCEPTION_LIMITS.overuseMinutes.min, PERCEPTION_LIMITS.overuseMinutes.max, PERCEPTION_DEFAULTS.overuseMinutes),
       overuseAction: parsed.overuseAction === "lock" ? "lock" : "return",
       overuseApps: sanitizeKeywords(parsed.overuseApps),
+      overuseLockApps: sanitizeKeywords(parsed.overuseLockApps),
       overuseMessage: typeof parsed.overuseMessage === "string" && parsed.overuseMessage.trim()
         ? parsed.overuseMessage.trim().slice(0, 80)
         : PERCEPTION_DEFAULTS.overuseMessage,

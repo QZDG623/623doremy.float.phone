@@ -952,10 +952,49 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
                           </button>
                         </div>
                       </div>
+                      <div className="per-field" style={{ alignItems: "flex-start" }}>
+                        <div className="per-field-body">
+                          <div className="per-field-label">这些直接锁定</div>
+                          <div className="per-field-hint">
+                            列在这里的应用超时后一律全屏锁定，不看上面的「怎么处置」。
+                            适合短视频、游戏这类必须硬拦的；留空 = 全部按上面的方式
+                          </div>
+                          {config.overuseLockApps.map((keyword, idx) => (
+                            <div key={idx} style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 8 }}>
+                              <input
+                                className="per-field-input"
+                                style={{ flex: 1, minWidth: 0 }}
+                                placeholder="应用名或包名，如 抖音"
+                                value={keyword}
+                                onChange={e => updatePassive({
+                                  overuseLockApps: config.overuseLockApps.map((k, i) => i === idx ? e.target.value : k),
+                                })}
+                              />
+                              <button
+                                type="button"
+                                className="ui-btn ui-btn-soft-danger"
+                                onClick={() => updatePassive({
+                                  overuseLockApps: config.overuseLockApps.filter((_, i) => i !== idx),
+                                })}
+                              >
+                                <Trash2 size={14} strokeWidth={2} />
+                              </button>
+                            </div>
+                          ))}
+                          <button
+                            type="button"
+                            className="ui-btn ui-btn-outline"
+                            style={{ marginTop: 8 }}
+                            onClick={() => updatePassive({ overuseLockApps: [...config.overuseLockApps, ""] })}
+                          >
+                            <Plus size={14} strokeWidth={2} /> 添加锁定应用
+                          </button>
+                        </div>
+                      </div>
                       <div className="per-field">
                         <div className="per-field-body">
                           <div className="per-field-label">遮罩上说什么</div>
-                          <div className="per-field-hint">选「强行锁定」时这句话会显示在全屏遮罩上</div>
+                          <div className="per-field-hint">选「强行锁定」或命中上面的锁定应用时，这句话会显示在全屏遮罩上</div>
                         </div>
                         <input
                           className="per-field-input"

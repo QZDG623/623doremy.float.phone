@@ -208,6 +208,13 @@ export type PerceptionConfig = {
   overuseAction: "return" | "lock";
   /** 要管的应用（显示名或包名包含匹配）。空数组 = 除小手机外的所有应用。 */
   overuseApps: string[];
+  /**
+   * 这些应用超时后一律「全屏锁定」，不看 overuseAction。
+   *
+   * 用户的两条诉求可以同时成立：普通应用用太久先拉回小手机，
+   * 短视频这类专门列出来的应用直接锁死。留空 = 全部按 overuseAction。
+   */
+  overuseLockApps: string[];
   /** 锁定/拉回遮罩上的那句话。 */
   overuseMessage: string;
 };
@@ -244,6 +251,7 @@ export const PERCEPTION_DEFAULTS: PerceptionConfig = {
   overuseMinutes: 0,
   overuseAction: "return",
   overuseApps: [],
+  overuseLockApps: [],
   overuseMessage: "这个应用用太久了，先回小手机歇一会儿吧。",
 };
 

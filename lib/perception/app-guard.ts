@@ -51,6 +51,7 @@ export function syncAppGuardToNative(config: PerceptionConfig): void {
       overuseMinutes: config.overuseMinutes,
       overuseAction: config.overuseAction,
       overuseApps: config.overuseApps,
+      overuseLockApps: config.overuseLockApps,
       overuseMessage: config.overuseMessage,
     }));
   } catch {

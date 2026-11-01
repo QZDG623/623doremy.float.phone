@@ -237,9 +237,12 @@ class AppGuard(private val context: Context) {
         if (since <= 0L) return
 
         val list = root.optJSONArray("overuseApps")
+        val lockList = root.optJSONArray("overuseLockApps")
         // 空列表 = 管除小手机外的所有应用
         val watchAll = list == null || list.length() == 0
-        if (!watchAll && !matches(list, pkg, labelOf(pkg))) return
+        val label = labelOf(pkg)
+        val forceLock = matches(lockList, pkg, label)
+        if (!watchAll && !matches(list, pkg, label) && !forceLock) return
 
         if (System.currentTimeMillis() - since < minutes * 60_000L) return
 
@@ -248,7 +251,8 @@ class AppGuard(private val context: Context) {
         overuseHandledPkg = pkg
         overuseHandledAt = now
 
-        if (root.optString("overuseAction", "return") == "lock") {
+        // 单独列为「直接锁定」的应用不看全局动作；其余按 overuseAction。
+        if (forceLock || root.optString("overuseAction", "return") == "lock") {
             lockedPkg = pkg
             showOverlay(
                 "先歇一会儿",
