@@ -35,7 +35,9 @@
 // v32：本地聊天库加每日快照 + 异常退出检测，输入框拆出 memo 组件（打字不再整页重渲染）。
 // v33：收藏夹只收真正生成的图片、档案墙显示精确条数、侧滑逐级返回、语音合成兜底
 //      重试，并新增睡眠电台 App。升版让设备丢掉旧 JS，拉取带新面板的构建。
-const CACHE_VERSION = "ai-phone-pwa-v33";
+// v34：剧情后台生成、目录分组、通用生成能力与尾部开关、悬浮小手机改为完整聊天界面，
+//      睡眠电台支持正倒序与汇总所有 App 的语音。
+const CACHE_VERSION = "ai-phone-pwa-v34";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 

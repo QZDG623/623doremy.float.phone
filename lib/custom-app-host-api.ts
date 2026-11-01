@@ -1030,6 +1030,14 @@ export async function synthesizeCustomAppSpeech(app: InstalledCustomApp, record:
   const emotion = cleanText(record.emotion, 30) || undefined;
   const blob = await synthesizeSpeech(text, voiceConfig, { emotion });
   if (!blob) throw new Error("语音合成未返回音频。");
+  // 所有自定义 App（共筑小屋、自习室等）的 TTS 都从这里出，顺手收进睡眠电台
+  void import("./radio-voice-store").then(({ recordRadioVoice }) => recordRadioVoice(blob, {
+    id: `custom:${app.id}:${Date.now()}`,
+    characterId: cleanText(record.characterId, 160) || `custom_app_${app.id}`,
+    characterName: cleanText(record.characterName ?? record.name, 200) || app.name || "自定义 App",
+    text,
+    createdAt: new Date().toISOString(),
+  })).catch(() => undefined);
   return {
     ok: true,
     configId: config.id,

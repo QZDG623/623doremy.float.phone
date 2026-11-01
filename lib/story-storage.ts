@@ -321,6 +321,10 @@ export type StoryCharacterSettings = {
   theaterSchemes?: StoryTailScheme[];
   floatingPhoneEnabled?: boolean;
   floatingPhoneInContext?: boolean;
+  /** 后续请求是否要求 AI 生成状态栏；默认开启（关闭不处理已生成的消息）。 */
+  generateStatusBar?: boolean;
+  /** 后续请求是否要求 AI 生成小剧场；默认开启。 */
+  generateTheater?: boolean;
 };
 
 export type StoryOwnerType = "single" | "group";

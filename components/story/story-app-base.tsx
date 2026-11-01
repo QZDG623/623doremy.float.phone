@@ -50,14 +50,27 @@ import { Avatar } from "@/components/ui/primitives";
 import { StoryHtmlRenderer, type StoryVoiceSegment } from "@/components/ui/story-html-renderer";
 import { StorySettingsPage, STORY_DEFAULT_STATUS_RENDER, STORY_DEFAULT_THEATER_RENDER } from "@/components/story/story-settings-page";
 import { loadCharacters } from "@/lib/character-storage";
-import { maybeRunSummarization } from "@/lib/memory-summarizer";
-import { incrementEventCounter } from "@/lib/memory-storage";
 import { loadBindingConfig, loadPresets, resolveBinding, resolveUserIdentity } from "@/lib/settings-storage";
 import {
-  generateStoryCompletion,
   getStoryRenderSignature,
   rebuildStorySessionRenderCache,
 } from "@/lib/story-engine";
+import {
+  cancelStoryGeneration,
+  getActiveStoryGeneratingSessionIds,
+  runStoryGeneration,
+  STORY_GENERATION_EVENT,
+  type StoryGenerationEventDetail,
+} from "@/lib/story-generation-service";
+import {
+  loadStoryGenerationPrefs,
+  saveStoryGenerationPrefs,
+  setStoryForegroundCharacters,
+  STORY_GENERATION_PREFS_EVENT,
+  type StoryGenerationPrefs,
+} from "@/lib/story-generation-prefs";
+import { recordRadioVoice } from "@/lib/radio-voice-store";
+import { PhoneChatApp } from "@/components/chat/phone-chat-app";
 import {
   createOrGetStorySession,
   createStoryGroup,
@@ -87,11 +100,8 @@ import {
   type StoryGroup,
   type StoryOwnerType,
 } from "@/lib/story-storage";
-import { createOrGetSession, hydrateChatStorage, loadChatMessages, loadChatSessions, markChatSessionRead, pushChatMessage } from "@/lib/chat-storage";
+import { loadChatMessages, loadChatSessions } from "@/lib/chat-storage";
 import { addArchiveEntry } from "@/lib/archive-storage";
-import { flattenCompletionResult, generateChatCompletion } from "@/lib/chat-engine";
-import { generateGroupChatCompletion } from "@/lib/group-chat-engine";
-import { parseAIResponse } from "@/lib/rich-message-parser";
 import { SessionCustomCSS } from "@/components/ui/session-custom-css";
 import { STORY_CSS_EXAMPLE } from "@/lib/css-examples";
 import { applyEditOutputRegex } from "@/lib/llm-prompt-assembler";
@@ -109,12 +119,6 @@ type StoryAppProps = {
   onClose: () => void;
 };
 
-type StoryGenerationRun = {
-  runId: string;
-  controller: AbortController;
-};
-
-const activeStoryGenerationRuns = new Map<string, StoryGenerationRun>();
 const storyVoiceCache = new Map<string, Blob>();
 const STORY_VOICE_CACHE_LIMIT = 24;
 const STORY_ACTIVE_CHARACTER_KEY = "story-last-active-character-id";
@@ -159,43 +163,6 @@ function cacheStoryVoice(key: string, blob: Blob) {
     if (!oldest) break;
     storyVoiceCache.delete(oldest);
   }
-}
-
-function createStoryGenerationRun(sessionId: string): StoryGenerationRun {
-  activeStoryGenerationRuns.get(sessionId)?.controller.abort();
-  const run = {
-    runId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    controller: new AbortController(),
-  };
-  activeStoryGenerationRuns.set(sessionId, run);
-  return run;
-}
-
-function isStoryGenerationRunActive(sessionId: string, runId: string): boolean {
-  const run = activeStoryGenerationRuns.get(sessionId);
-  return Boolean(run && run.runId === runId && !run.controller.signal.aborted);
-}
-
-function finishStoryGenerationRun(sessionId: string, runId: string): boolean {
-  const run = activeStoryGenerationRuns.get(sessionId);
-  if (!run || run.runId !== runId) return false;
-  activeStoryGenerationRuns.delete(sessionId);
-  return true;
-}
-
-function cancelStoryGenerationRun(sessionId: string): boolean {
-  const run = activeStoryGenerationRuns.get(sessionId);
-  if (!run) return false;
-  run.controller.abort();
-  activeStoryGenerationRuns.delete(sessionId);
-  return true;
-}
-
-function isAbortLikeError(error: unknown): boolean {
-  if (!error) return false;
-  if (error instanceof DOMException && error.name === "AbortError") return true;
-  if (error instanceof Error) return error.name === "AbortError" || /aborted|abort/i.test(error.message);
-  return false;
 }
 
 function formatStoryTime(iso: string): string {
@@ -497,10 +464,9 @@ export function StoryApp({ onClose }: StoryAppProps) {
   const [schemeRepoVersion, setSchemeRepoVersion] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [floatingPhoneOpen, setFloatingPhoneOpen] = useState(false);
+  // 悬浮小手机里当前打开的聊天会话（用来区分“在聊天室”还是“在会话列表”）
+  const [floatingPhoneChatSessionId, setFloatingPhoneChatSessionId] = useState<string | null>(null);
   const [floatingGroupSessionId, setFloatingGroupSessionId] = useState("");
-  const [floatingChatDraft, setFloatingChatDraft] = useState("");
-  const [floatingChatGenerating, setFloatingChatGenerating] = useState(false);
-  const [floatingChatVersion, setFloatingChatVersion] = useState(0);
   const [activeCharacterId, setActiveCharacterId] = useState<string>("");
   const [activeGroupId, setActiveGroupId] = useState<string>("");
   const [activeSessionId, setActiveSessionId] = useState<string>("");
@@ -512,6 +478,10 @@ export function StoryApp({ onClose }: StoryAppProps) {
   const [contextExcludedTagsDraft, setContextExcludedTagsDraft] = useState("");
   // 生成状态按会话记录：避免在 A 会话生成时切到 B 会话也显示"正在生成"
   const [generatingSessionIds, setGeneratingSessionIds] = useState<ReadonlySet<string>>(() => new Set());
+  // 流式预览：当前已输出正文，按会话保存，切换会话不串台
+  const [streamingBySession, setStreamingBySession] = useState<Record<string, string>>({});
+  // 通用生成能力（所有角色/多人组/主线和分线共用）
+  const [generationPrefs, setGenerationPrefs] = useState<StoryGenerationPrefs>(() => loadStoryGenerationPrefs());
   // 抽屉滑动手势用 ref 而不是 state：手指按住时 touchmove 每帧都在触发，
   // 逐帧 setState 会让整个剧情页以事件频率重渲染（iOS 上拉到顶/底按住不动时
   // 表现为持续的重排/闪烁）
@@ -531,7 +501,6 @@ export function StoryApp({ onClose }: StoryAppProps) {
   const [currentReadExpanded, setCurrentReadExpanded] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const shellInnerRef = useRef<HTMLDivElement | null>(null);
-  const mountedRef = useRef(true);
   const activeSessionIdRef = useRef("");
   const cacheRefreshKeyRef = useRef<string | null>(null);
   const composerAppendIdRef = useRef(0);
@@ -550,7 +519,6 @@ export function StoryApp({ onClose }: StoryAppProps) {
   const voiceRequestIdRef = useRef(0);
   const voiceNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const voiceSequenceIndexRef = useRef(0);
-  const miniPhoneScrollRef = useRef<HTMLDivElement | null>(null);
   const autoStartedSessionIdsRef = useRef(new Set<string>());
 
   const characters = useMemo(() => loadCharacters(), []);
@@ -607,7 +575,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
   }, [activeCharacterId]);
   const floatingGroupChatCandidates = useMemo(() => activeGroup
     ? loadChatSessions().filter((item) => item.isGroup)
-    : [], [activeGroup, floatingChatVersion]);
+    : [], [activeGroup]);
   const floatingChatSession = useMemo(() => {
     if (!activeCharacterId) return null;
     if (activeGroup) {
@@ -616,16 +584,22 @@ export function StoryApp({ onClose }: StoryAppProps) {
       return floatingGroupChatCandidates.find((item) => activeGroup.characterIds.every((id) => item.participantIds?.includes(id))) || floatingGroupChatCandidates[0] || null;
     }
     return loadChatSessions().find((item) => item.contactId === activeCharacterId && !item.isGroup) || null;
-  }, [activeCharacterId, activeGroup, floatingChatVersion, floatingGroupChatCandidates, floatingGroupSessionId]);
-  const floatingChatMessages = useMemo(() => floatingChatSession
-    ? loadChatMessages(floatingChatSession.id).filter((item) => item.role === "user" || item.role === "assistant").slice(-30)
-    : [], [floatingChatSession, floatingChatVersion]);
-  const floatingChatContext = useMemo(() => floatingChatMessages.map((message) => {
-    const name = message.role === "user" ? (userIdentity?.name || "用户") : (currentCharacter?.name || "角色");
-    const text = message.content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-    return `${new Date(message.createdAt).toLocaleString()} ${name}：${text}`;
-  }).join("\n"), [currentCharacter?.name, floatingChatMessages, userIdentity?.name]);
+  }, [activeCharacterId, activeGroup, floatingGroupChatCandidates, floatingGroupSessionId]);
+  // 悬浮小手机的线上聊天 → 剧情上下文。每次生成时现读，保证刚聊完的内容也能带进去。
+  const buildFloatingChatContext = useCallback((): string | undefined => {
+    if (!storySettings.floatingPhoneInContext || !floatingChatSession) return undefined;
+    const messages = loadChatMessages(floatingChatSession.id)
+      .filter((item) => item.role === "user" || item.role === "assistant")
+      .slice(-30);
+    if (!messages.length) return undefined;
+    return messages.map((message) => {
+      const name = message.role === "user" ? (userIdentity?.name || "用户") : (currentCharacter?.name || "角色");
+      const text = message.content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+      return `${new Date(message.createdAt).toLocaleString()} ${name}：${text}`;
+    }).join("\n");
+  }, [currentCharacter?.name, floatingChatSession, storySettings.floatingPhoneInContext, userIdentity?.name]);
   const isGenerating = Boolean(activeSessionId) && generatingSessionIds.has(activeSessionId);
+  const streamingPreview = activeSessionId ? streamingBySession[activeSessionId] || "" : "";
   const latestAssistantMessageId = useMemo(
     () => [...messages].reverse().find((message) => message.role === "assistant")?.id || "",
     [messages],
@@ -650,18 +624,98 @@ export function StoryApp({ onClose }: StoryAppProps) {
     setFloatingGroupSessionId(matching?.id || floatingGroupChatCandidates[0]?.id || "");
   }, [activeGroup?.id, floatingGroupChatCandidates, floatingGroupSessionId]);
 
+  // 卸载时只清理本地播放器：剧情生成跑在模块级服务里，切 App / 切出小手机都不中断
   useEffect(() => {
-    mountedRef.current = true;
     return () => {
-      mountedRef.current = false;
       voiceRequestIdRef.current += 1;
       voicePlaybackRef.current?.abort();
       if (voiceNoticeTimerRef.current) clearTimeout(voiceNoticeTimerRef.current);
-      if (activeSessionIdRef.current) {
-        cancelStoryGenerationRun(activeSessionIdRef.current);
-      }
     };
   }, []);
+
+  // 订阅模块级生成服务：恢复仍在跑的会话、处理流式增量与完成/失败
+  useEffect(() => {
+    const onGenerationUpdate = (event: Event) => {
+      const detail = (event as CustomEvent<StoryGenerationEventDetail>).detail;
+      if (!detail?.sessionId) return;
+      const { sessionId, state, text } = detail;
+      const running = state === "started" || state === "streaming";
+      setGeneratingSessionIds((prev) => {
+        if (running === prev.has(sessionId)) return prev;
+        const next = new Set(prev);
+        if (running) next.add(sessionId); else next.delete(sessionId);
+        return next;
+      });
+      if (state === "streaming") {
+        if (text !== undefined) setStreamingBySession((prev) => ({ ...prev, [sessionId]: text }));
+        return;
+      }
+      setStreamingBySession((prev) => {
+        if (!(sessionId in prev)) return prev;
+        const next = { ...prev };
+        delete next[sessionId];
+        return next;
+      });
+      if (state === "finished" || state === "failed") {
+        if (activeSessionIdRef.current === sessionId) setMessages(loadStoryMessages(sessionId));
+        setStorageVersion((value) => value + 1);
+      }
+    };
+    window.addEventListener(STORY_GENERATION_EVENT, onGenerationUpdate);
+    // 页面重新挂载时，服务里可能还有在跑的任务（切 App 后回来），补回“正在生成”
+    setGeneratingSessionIds(new Set(getActiveStoryGeneratingSessionIds()));
+    return () => window.removeEventListener(STORY_GENERATION_EVENT, onGenerationUpdate);
+  }, []);
+
+  // 通用生成能力开关（所有角色/多人组共用）
+  useEffect(() => {
+    const onPrefsUpdate = () => setGenerationPrefs(loadStoryGenerationPrefs());
+    window.addEventListener(STORY_GENERATION_PREFS_EVENT, onPrefsUpdate);
+    return () => window.removeEventListener(STORY_GENERATION_PREFS_EVENT, onPrefsUpdate);
+  }, []);
+
+  // 剧情前台占用登记：开启“截断后台主动发消息”时，当前角色正在生成的线上回复立即中止
+  const foregroundCharacterKey = (currentSession?.participantIds?.length
+    ? currentSession.participantIds
+    : [activeCharacterId]).filter(Boolean).join(",");
+  useEffect(() => {
+    const ids = foregroundCharacterKey.split(",").filter(Boolean);
+    setStoryForegroundCharacters(ids);
+    if (generationPrefs.interruptBackgroundMessages && ids.length > 0) {
+      void import("@/lib/follow-up-service").then(({ cancelFollowUp, cancelBackgroundGeneration }) => {
+        for (const session of loadChatSessions()) {
+          const relatedIds = [session.contactId, ...(session.participantIds || [])].filter(Boolean) as string[];
+          if (!relatedIds.some((id) => ids.includes(id))) continue;
+          cancelFollowUp(session.id);
+          cancelBackgroundGeneration(session.id);
+        }
+      }).catch(() => undefined);
+    }
+    return () => setStoryForegroundCharacters(null);
+  }, [foregroundCharacterKey, generationPrefs.interruptBackgroundMessages]);
+
+  // 侧滑/返回键：先把剧情页内的二级界面逐级退出，最后才由桌面壳关闭剧情 App。
+  // 悬浮小手机聊天室内部的逐级返回由 PhoneChatApp 自己消费，这里只在列表层关闭。
+  useEffect(() => {
+    const onBack = (event: Event) => {
+      if (floatingPhoneOpen) {
+        if (floatingPhoneChatSessionId) return; // 交给 PhoneChatApp 退回会话列表
+        event.preventDefault();
+        setFloatingPhoneOpen(false);
+        setFloatingPhoneChatSessionId(null);
+        return;
+      }
+      if (settingsOpen) {
+        event.preventDefault();
+        setSettingsOpen(false);
+        return;
+      }
+      if (cssModalOpen) { event.preventDefault(); setCssModalOpen(false); return; }
+      if (quickStoryOpen) { event.preventDefault(); setQuickStoryOpen(false); }
+    };
+    window.addEventListener("float:back", onBack);
+    return () => window.removeEventListener("float:back", onBack);
+  }, [floatingPhoneOpen, floatingPhoneChatSessionId, settingsOpen, cssModalOpen, quickStoryOpen]);
 
   useEffect(() => {
     voiceSequenceIndexRef.current = 0;
@@ -671,13 +725,6 @@ export function StoryApp({ onClose }: StoryAppProps) {
     voicePlaybackRef.current = null;
     setPlayingVoiceSegmentId(null);
   }, [activeSessionId, latestAssistantMessageId]);
-
-  useLayoutEffect(() => {
-    if (!floatingPhoneOpen) return;
-    const node = miniPhoneScrollRef.current;
-    if (!node) return;
-    node.scrollTop = node.scrollHeight;
-  }, [floatingChatGenerating, floatingChatVersion, floatingPhoneOpen]);
 
   function activateStorySession(session: StorySession) {
     setActiveSessionId(session.id);
@@ -1350,6 +1397,15 @@ export function StoryApp({ onClose }: StoryAppProps) {
       if (requestId !== voiceRequestIdRef.current) return false;
       if (!blob) throw new Error("语音服务没有返回音频");
 
+      // 剧情语音也收进睡眠电台（按角色分类），与聊天/漫卷语音一起汇总
+      void recordRadioVoice(blob, {
+        id: `story:${activeSessionIdRef.current}:${segment.id}`,
+        characterId: activeCharacterId,
+        characterName: currentCharacter?.name || storyDisplayName,
+        characterAvatar: currentCharacter?.avatar || undefined,
+        text: segment.text,
+      }).catch(() => undefined);
+
       const playback = playAudioBlobViaMediaElement(blob);
       voicePlaybackRef.current = playback;
       await playback.promise;
@@ -1365,7 +1421,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
         setPlayingVoiceSegmentId(null);
       }
     }
-  }, [activeCharacterId, playingVoiceSegmentId, showVoiceNotice, uiPrefs.voiceEnabled]);
+  }, [activeCharacterId, currentCharacter, playingVoiceSegmentId, showVoiceNotice, storyDisplayName, uiPrefs.voiceEnabled]);
 
   const handleStoryVoicePlay = useCallback((segment: StoryVoiceSegment) => {
     void playStoryVoice(segment);
@@ -1423,11 +1479,10 @@ export function StoryApp({ onClose }: StoryAppProps) {
     voiceSequenceIndexRef.current = segments.length;
   }, [collectStoryVoiceSegments, playStoryVoice, playingVoiceSegmentId, showVoiceNotice, uiPrefs.voiceEnabled]);
 
-  async function handleSend(userTextInput: string) {
+  function handleSend(userTextInput: string) {
     const userText = userTextInput.trim();
     if (!activeSessionId || !userText || isGenerating) return;
     const sessionId = activeSessionId;
-    const characterId = activeCharacterId;
 
     const userMessage = pushStoryMessage({
       sessionId,
@@ -1438,75 +1493,16 @@ export function StoryApp({ onClose }: StoryAppProps) {
     setMessages((prev) => [...prev, userMessage]);
     setStorageVersion((value) => value + 1);
     markGenerating(sessionId, true);
-    const generationRun = createStoryGenerationRun(sessionId);
-    const generationRunId = generationRun.runId;
-    const isCurrentGeneration = () => mountedRef.current && isStoryGenerationRunActive(sessionId, generationRunId);
 
-    try {
-      const historyForGeneration = loadStoryMessages(sessionId);
-      const result = await generateStoryCompletion(characterId, historyForGeneration, {
-        sessionFoldTags: currentSession?.foldTags,
-        sessionContextExcludedTags: currentSession?.contextExcludedTags,
-        settings: currentSession?.settings,
-        floatingChatContext,
-        participantIds: currentSession?.participantIds || [characterId],
-        storyMemory: {
-          independent: currentSession?.independentStory,
-          inheritRecentMemory: currentSession?.inheritRecentMemory ?? true,
-          startedAt: currentSession?.createdAt,
-        },
-        signal: generationRun.controller.signal,
-      });
-      if (!isCurrentGeneration()) return;
-      const assistantMessage = pushStoryMessage({
-        sessionId,
-        role: "assistant",
-        rawContent: result.rawText,
-        renderedContent: result.renderedText,
-        storySummary: result.storySummary,
-        regexSignature: result.regexSignature,
-        parserVersion: result.parserVersion,
-      });
-      if (activeSessionIdRef.current === sessionId) {
-        setMessages(loadStoryMessages(sessionId)); // 按会话从存储重读，杜绝跨会话串消息
-      }
-      setStorageVersion((value) => value + 1);
-
-      const memoryCharacterIds = currentSession?.participantIds?.length ? currentSession.participantIds : [characterId];
-      const storyCharacters = memoryCharacterIds
-        .map((id) => characters.find((character) => character.id === id))
-        .filter((item): item is NonNullable<typeof item> => Boolean(item));
-      if (storyCharacters.length && !currentSession?.independentStory) {
-        void (async () => {
-          try {
-            for (const storyCharacter of storyCharacters) {
-              incrementEventCounter(storyCharacter.id);
-              incrementEventCounter(storyCharacter.id);
-              await maybeRunSummarization(storyCharacter.id, storyCharacter.name);
-            }
-          } catch (err) {
-            console.warn("[StoryApp] Memory counter/summarization failed:", err);
-          }
-        })();
-      }
-    } catch (error) {
-      if (!isCurrentGeneration() || isAbortLikeError(error)) return;
-      const errText = error instanceof Error ? error.message : "剧情生成失败，请稍后再试。";
-      const systemMessage = pushStoryMessage({
-        sessionId,
-        role: "system",
-        rawContent: errText,
-        renderedContent: errText,
-      });
-      if (activeSessionIdRef.current === sessionId) {
-        setMessages(loadStoryMessages(sessionId));
-      }
-      setStorageVersion((value) => value + 1);
-    } finally {
-      if (finishStoryGenerationRun(sessionId, generationRunId)) {
-        markGenerating(sessionId, false);
-      }
-    }
+    // 生成跑在模块级服务里：切 App / 切出小手机都不会中断，完成后再广播事件
+    void runStoryGeneration({
+      sessionId,
+      characterId: activeCharacterId,
+      session: currentSession,
+      floatingChatContext: buildFloatingChatContext(),
+      stream: generationPrefs.streamOutput,
+      timeAware: generationPrefs.timeAware,
+    });
   }
 
   // 私聊邀请/快捷新分线进入后，由角色直接开场；提示只参与本次生成，不渲染成用户气泡。
@@ -1516,156 +1512,25 @@ export function StoryApp({ onClose }: StoryAppProps) {
     if (!ready || !session || !prompt || !activeCharacterId || isGenerating) return;
     if (autoStartedSessionIdsRef.current.has(session.id)) return;
     autoStartedSessionIdsRef.current.add(session.id);
+    const startedAt = session.autoStartRequestedAt || new Date().toISOString();
     updateStorySession(session.id, { autoStartPrompt: undefined, autoStartRequestedAt: undefined });
 
-    const sessionId = session.id;
-    const characterId = activeCharacterId;
-    const virtualMessage: StoryMessage = {
-      id: `story_auto_${Date.now()}`,
-      sessionId,
-      role: "user",
-      rawContent: prompt,
-      renderedContent: prompt,
-      createdAt: session.autoStartRequestedAt || new Date().toISOString(),
-    };
-    markGenerating(sessionId, true);
-    const generationRun = createStoryGenerationRun(sessionId);
-    const generationRunId = generationRun.runId;
-    const isCurrentGeneration = () => mountedRef.current && isStoryGenerationRunActive(sessionId, generationRunId);
-
-    void generateStoryCompletion(characterId, [...loadStoryMessages(sessionId), virtualMessage], {
-      sessionFoldTags: session.foldTags,
-      sessionContextExcludedTags: session.contextExcludedTags,
-      settings: session.settings,
-      floatingChatContext,
-      participantIds: session.participantIds || [characterId],
-      storyMemory: {
-        independent: session.independentStory,
-        inheritRecentMemory: session.inheritRecentMemory ?? true,
-        startedAt: session.createdAt,
-      },
-      signal: generationRun.controller.signal,
-    }).then((result) => {
-      if (!isCurrentGeneration()) return;
-      pushStoryMessage({
-        sessionId,
-        role: "assistant",
-        rawContent: result.rawText,
-        renderedContent: result.renderedText,
-        storySummary: result.storySummary,
-        regexSignature: result.regexSignature,
-        parserVersion: result.parserVersion,
-      });
-      if (activeSessionIdRef.current === sessionId) setMessages(loadStoryMessages(sessionId));
-      setStorageVersion((value) => value + 1);
-
-      if (!session.independentStory) {
-        for (const id of session.participantIds?.length ? session.participantIds : [characterId]) {
-          const item = characters.find((candidate) => candidate.id === id);
-          if (!item) continue;
-          incrementEventCounter(item.id);
-          void maybeRunSummarization(item.id, item.name).catch(() => undefined);
-        }
-      }
-    }).catch((error) => {
-      if (!isCurrentGeneration() || isAbortLikeError(error)) return;
-      const text = error instanceof Error ? error.message : "剧情自动开场失败，请点击续写重试。";
-      pushStoryMessage({ sessionId, role: "system", rawContent: text, renderedContent: text });
-      if (activeSessionIdRef.current === sessionId) setMessages(loadStoryMessages(sessionId));
-      setStorageVersion((value) => value + 1);
-    }).finally(() => {
-      if (finishStoryGenerationRun(sessionId, generationRunId)) markGenerating(sessionId, false);
+    markGenerating(session.id, true);
+    void runStoryGeneration({
+      sessionId: session.id,
+      characterId: activeCharacterId,
+      session,
+      floatingChatContext: buildFloatingChatContext(),
+      virtualUserText: prompt,
+      virtualCreatedAt: startedAt,
+      stream: generationPrefs.streamOutput,
+      timeAware: generationPrefs.timeAware,
     });
   }, [activeCharacterId, activeSessionId, currentSession?.autoStartPrompt, ready]);
 
-  async function handleFloatingChatSend() {
-    const text = floatingChatDraft.trim();
-    if (!text || !activeCharacterId || floatingChatGenerating) return;
-    const storySessionId = activeSessionId;
-    const characterId = activeCharacterId;
-    const characterName = currentCharacter?.name || "角色";
-    const userName = userIdentity?.name || "用户";
-    setFloatingChatDraft("");
-    setFloatingChatGenerating(true);
-    try {
-      await hydrateChatStorage();
-      const chatSession = activeGroup ? floatingChatSession : createOrGetSession(characterId);
-      if (!chatSession) throw new Error("若没有群聊建议先建一个群聊");
-      pushChatMessage({ sessionId: chatSession.id, role: "user", content: text, origin: "story_floating_phone" });
-      setFloatingChatVersion((value) => value + 1);
-
-      const history = loadChatMessages(chatSession.id);
-      const replyLines: string[] = [];
-      if (activeGroup) {
-        const results = await generateGroupChatCompletion(chatSession, history, undefined, { appTags: ["group_chat", "text"] });
-        if (!results.length) throw new Error("群聊没有返回可显示的聊天内容");
-        results.forEach((result) => {
-          const parsed = parseAIResponse(result.responseText, []);
-          const parts = parsed.parts.length ? parsed.parts : [{ content: result.responseText }];
-          parts.forEach((part, index) => {
-            pushChatMessage({
-              sessionId: chatSession.id, role: "assistant", content: part.content,
-              mediaType: part.mediaType, mediaData: part.mediaData,
-              senderCharacterId: result.characterId, senderName: result.characterName,
-              origin: "story_floating_phone",
-              statusPanel: index === 0 ? (parsed.statusPanel || undefined) : undefined,
-              innerMonologue: index === 0 ? (parsed.innerMonologue || undefined) : undefined,
-              stateValues: index === 0 && parsed.stateValues.length ? parsed.stateValues : undefined,
-              freshStateValues: index === 0 && parsed.freshStateValues.length ? parsed.freshStateValues : undefined,
-            });
-            const visible = part.content.trim() || part.mediaData?.label || (part.mediaType ? `[${part.mediaType}]` : "");
-            if (visible) replyLines.push(`${result.characterName}：${visible}`);
-          });
-        });
-      } else {
-        const completion = await generateChatCompletion(chatSession, history, { appTags: ["chat", "text"], appId: "chat" });
-        const rawReply = flattenCompletionResult(completion).trim();
-        if (!rawReply) throw new Error("角色没有返回可显示的聊天内容");
-        const previousState = [...history].reverse().find((item) => item.stateValues?.length)?.stateValues || [];
-        const parsed = parseAIResponse(rawReply, previousState);
-        const parts = parsed.parts.length ? parsed.parts : [{ content: rawReply }];
-        parts.forEach((part, index) => {
-          pushChatMessage({
-            sessionId: chatSession.id, role: "assistant", content: part.content,
-            mediaType: part.mediaType, mediaData: part.mediaData,
-            senderCharacterId: characterId, senderName: characterName, origin: "story_floating_phone",
-            statusPanel: index === 0 ? (parsed.statusPanel || undefined) : undefined,
-            innerMonologue: index === 0 ? (parsed.innerMonologue || undefined) : undefined,
-            stateValues: index === 0 && parsed.stateValues.length ? parsed.stateValues : undefined,
-            freshStateValues: index === 0 && parsed.freshStateValues.length ? parsed.freshStateValues : undefined,
-          });
-          const visible = part.content.trim() || part.mediaData?.label || (part.mediaType ? `[${part.mediaType}]` : "");
-          if (visible) replyLines.push(`${characterName}：${visible}`);
-        });
-      }
-
-      const stamp = new Date().toLocaleString([], { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
-      const transcript = [
-        `【线上聊天 · ${stamp}】`,
-        `${userName}：${text}`,
-        ...replyLines,
-      ].join("\n");
-      if (storySessionId) {
-        pushStoryMessage({ sessionId: storySessionId, role: "system", rawContent: transcript, renderedContent: transcript });
-        if (activeSessionIdRef.current === storySessionId) setMessages(loadStoryMessages(storySessionId));
-      }
-      // 这轮聊天就在悬浮小手机里完成，用户已经看过，不在剧情 APP 外保留未读红点。
-      markChatSessionRead(chatSession.id);
-      setFloatingChatVersion((value) => value + 1);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "悬浮聊天发送失败";
-      const chatSession = floatingChatSession || loadChatSessions().find((item) => item.contactId === characterId && !item.isGroup);
-      if (chatSession) pushChatMessage({ sessionId: chatSession.id, role: "system", content: `⚠️ ${message}` });
-      setFloatingChatVersion((value) => value + 1);
-      showVoiceNotice(message);
-    } finally {
-      setFloatingChatGenerating(false);
-    }
-  }
-
   function handleStopGeneration() {
     if (!activeSessionId) return;
-    const cancelled = cancelStoryGenerationRun(activeSessionId);
+    const cancelled = cancelStoryGeneration(activeSessionId);
     if (!cancelled && !isGenerating) return;
     markGenerating(activeSessionId, false);
   }
@@ -1790,13 +1655,12 @@ export function StoryApp({ onClose }: StoryAppProps) {
     else { fallbackCopy(); }
     setActiveMessageId(null);
   }
-  async function handleStoryRetry(msgId: string) {
+  function handleStoryRetry(msgId: string) {
     const msgIndex = messages.findIndex(m => m.id === msgId);
     if (msgIndex === -1) return;
     const retryMessage = messages[msgIndex];
     if (retryMessage.role !== "assistant" && retryMessage.role !== "user") return;
     const sessionId = activeSessionId;
-    const characterId = activeCharacterId;
     const contextMessages = retryMessage.role === "user"
       ? messages.slice(0, msgIndex + 1)
       : messages.slice(0, msgIndex);
@@ -1812,42 +1676,15 @@ export function StoryApp({ onClose }: StoryAppProps) {
     autoBottomLockRef.current = true;
     requestAnimationFrame(() => scrollStoryToBottom());
     markGenerating(sessionId, true);
-    const generationRun = createStoryGenerationRun(sessionId);
-    const generationRunId = generationRun.runId;
-    const isCurrentGeneration = () => mountedRef.current && isStoryGenerationRunActive(sessionId, generationRunId);
-    try {
-      const result = await generateStoryCompletion(characterId, contextMessages, {
-        sessionFoldTags: currentSession?.foldTags,
-        sessionContextExcludedTags: currentSession?.contextExcludedTags,
-        settings: currentSession?.settings,
-        floatingChatContext,
-        participantIds: currentSession?.participantIds || [characterId],
-        storyMemory: {
-          independent: currentSession?.independentStory,
-          inheritRecentMemory: currentSession?.inheritRecentMemory ?? true,
-          startedAt: currentSession?.createdAt,
-        },
-        signal: generationRun.controller.signal,
-      });
-      if (!isCurrentGeneration()) return;
-      const assistantMessage = pushStoryMessage({
-        sessionId, role: "assistant",
-        rawContent: result.rawText, renderedContent: result.renderedText,
-        storySummary: result.storySummary, regexSignature: result.regexSignature, parserVersion: result.parserVersion,
-      });
-      if (activeSessionIdRef.current === sessionId) setMessages(loadStoryMessages(sessionId));
-      setStorageVersion(v => v + 1);
-    } catch (error) {
-      if (!isCurrentGeneration() || isAbortLikeError(error)) return;
-      const errText = error instanceof Error ? error.message : "重试失败，请稍后再试。";
-      const systemMessage = pushStoryMessage({ sessionId, role: "system", rawContent: errText, renderedContent: errText });
-      if (activeSessionIdRef.current === sessionId) setMessages(loadStoryMessages(sessionId));
-      setStorageVersion(v => v + 1);
-    } finally {
-      if (finishStoryGenerationRun(sessionId, generationRunId)) {
-        markGenerating(sessionId, false);
-      }
-    }
+    // 截断已经写进存储，服务按存储里的历史重新生成
+    void runStoryGeneration({
+      sessionId,
+      characterId: activeCharacterId,
+      session: currentSession,
+      floatingChatContext: buildFloatingChatContext(),
+      stream: generationPrefs.streamOutput,
+      timeAware: generationPrefs.timeAware,
+    });
   }
 
   // 快捷输入面板：选项与光标位置来自公用仓库中当前角色选中的方案；选项全空时回落默认符号
@@ -1933,6 +1770,8 @@ export function StoryApp({ onClose }: StoryAppProps) {
           onExportAll={handleExportAllStories}
           onUiPrefsChange={(next) => applySessionUpdates({ uiPrefs: next })}
           onSettingsChange={(next) => applySessionUpdates({ settings: next })}
+          generationPrefs={generationPrefs}
+          onGenerationPrefsChange={(next) => setGenerationPrefs(saveStoryGenerationPrefs(next))}
           onSchemeRepoChange={saveStorySchemeRepository}
           onTagsChange={(foldTags, contextExcludedTags) => {
             setFoldTagsDraft(foldTags);
@@ -2195,10 +2034,30 @@ export function StoryApp({ onClose }: StoryAppProps) {
               </>
             )}
             {isGenerating ? (
-              <StoryGeneratingIndicator
-                characterName={storyDisplayName}
-                avatar={currentCharacter.avatar || undefined}
-              />
+              streamingPreview ? (
+                <article className="story-row" data-role="assistant">
+                  <div className="story-msg-head">
+                    <div className="story-avatar-wrap">
+                      <Avatar src={currentCharacter.avatar || undefined} name={storyDisplayName} size="md" />
+                    </div>
+                    <div className="story-msg-meta">
+                      <span className="story-msg-name">{storyDisplayName}</span>
+                      <span className="story-msg-time story-generating-head">正在实时写入</span>
+                    </div>
+                  </div>
+                  <div className="story-bubble-wrap">
+                    <div className="story-bubble story-streaming-bubble">
+                      <span className="story-streaming-copy">{streamingPreview}</span>
+                      <span className="story-generating-dots" aria-hidden="true"><i /><i /><i /></span>
+                    </div>
+                  </div>
+                </article>
+              ) : (
+                <StoryGeneratingIndicator
+                  characterName={storyDisplayName}
+                  avatar={currentCharacter.avatar || undefined}
+                />
+              )
             ) : null}
           </div>
         </div>
@@ -2236,44 +2095,20 @@ export function StoryApp({ onClose }: StoryAppProps) {
       />
 
       {storySettings.floatingPhoneEnabled ? (
-        <button className="story-floating-phone-ball" type="button" onClick={() => { setFloatingChatVersion((value) => value + 1); setFloatingPhoneOpen(true); }} aria-label="打开悬浮小手机"><MiniPhoneIcon size={18} /></button>
+        <button className="story-floating-phone-ball" type="button" onClick={() => setFloatingPhoneOpen(true)} aria-label="打开悬浮小手机"><MiniPhoneIcon size={18} /></button>
       ) : null}
       {floatingPhoneOpen ? (
         <div className="story-mini-phone-overlay" onClick={() => setFloatingPhoneOpen(false)}>
-          <section className="story-mini-phone" onClick={(event) => event.stopPropagation()}>
-            <header><button type="button" onClick={() => setFloatingPhoneOpen(false)}><XMarkIcon width={15} /></button><div><Avatar src={storyAvatar || undefined} name={storyDisplayName} size="sm" /><strong>{activeGroup ? (floatingChatSession?.groupName || "选择群聊") : currentCharacter.name}</strong></div><span /></header>
-            {activeGroup ? (
-              floatingGroupChatCandidates.length ? (
-                <label className="story-mini-phone-group-select"><span>悬浮小手机群聊</span><select value={floatingChatSession?.id || ""} onChange={(event) => setFloatingGroupSessionId(event.target.value)}>{floatingGroupChatCandidates.map((item) => <option key={item.id} value={item.id}>{item.groupName || "未命名群聊"}</option>)}</select></label>
-              ) : <p className="story-mini-phone-group-empty">若没有群聊建议先建一个群聊</p>
-            ) : null}
-            <div className="story-mini-phone-messages" ref={miniPhoneScrollRef}>
-              {floatingChatMessages.length ? floatingChatMessages.map((message) => (
-                <div key={message.id} data-role={message.role}>
-                  <small>{message.role === "user" ? (userIdentity?.name || "我") : (message.senderName || currentCharacter.name)} · {new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small>
-                  <p>{message.content || message.mediaData?.label || (message.mediaType ? `[${message.mediaType}]` : "")}</p>
-                </div>
-              )) : <p className="story-mini-phone-empty">{activeGroup && !floatingChatSession ? "若没有群聊建议先建一个群聊" : "还没有线上聊天记录"}</p>}
-              {floatingChatGenerating ? <div className="story-mini-phone-typing"><i /><i /><i /></div> : null}
-            </div>
-            <div className="story-mini-phone-composer">
-              <textarea
-                rows={1}
-                value={floatingChatDraft}
-                onChange={(event) => setFloatingChatDraft(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    void handleFloatingChatSend();
-                  }
-                }}
-                placeholder={activeGroup && !floatingChatSession ? "若没有群聊建议先建一个群聊" : "发消息…"}
-                disabled={floatingChatGenerating || Boolean(activeGroup && !floatingChatSession)}
-              />
-              <button type="button" onClick={() => { void handleFloatingChatSend(); }} disabled={!floatingChatDraft.trim() || floatingChatGenerating || Boolean(activeGroup && !floatingChatSession)} aria-label="发送消息">
-                {floatingChatGenerating ? <span>···</span> : <PaperAirplaneIcon width={14} />}
-              </button>
-            </div>
+          {/* 完整聊天界面：可切换角色、看联系人/朋友圈/设置，而不只是当前角色的几条记录 */}
+          <section className="story-mini-phone story-mini-phone-full" onClick={(event) => event.stopPropagation()}>
+            <PhoneChatApp
+              onClose={() => { setFloatingPhoneOpen(false); setFloatingPhoneChatSessionId(null); }}
+              initialSessionId={floatingChatSession?.id}
+              onSessionChange={(session) => {
+                setFloatingPhoneChatSessionId(session?.id || null);
+                if (activeGroup && session?.isGroup) setFloatingGroupSessionId(session.id);
+              }}
+            />
           </section>
         </div>
       ) : null}

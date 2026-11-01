@@ -4,13 +4,16 @@
 //
 // 数据来源：
 //   · 聊天里的语音条（合成完成后落库在 message.mediaUrl 里，data URL 长期有效）；
-//   · 收藏夹里的语音（可能来自通话/剧情/其它 App，已经转存 asset://）。
+//   · 收藏夹里的语音（可能来自通话/剧情/其它 App，已经转存 asset://）；
+//   · 漫卷的逐帧语音（message.frameAudio 里的 audioDataUrl）；
+//   · 其它 App（剧情、共筑小屋、自习室等）通过 recordRadioVoice 收进来的语音。
 //
 // 只收真的有音频的条目：还没合成或已被清理的语音不占位置，点播放时才去解析
 // asset:// / media-store:// 地址，解析不出来给一句明确提示。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowDownUp,
   ChevronLeft,
   Moon,
   Pause,
@@ -26,6 +29,8 @@ import { loadCharacters } from "@/lib/character-storage";
 import { loadArchiveEntries } from "@/lib/archive-storage";
 import { getChatAudioFromIndexedDB } from "@/lib/chat-asset-storage";
 import { isMediaStoreRef, loadMediaObjectUrl } from "@/lib/media-cache-storage";
+import { hydrateVnStorage, loadAllVnMessages, loadVnSessions } from "@/lib/vn-storage";
+import { loadRadioVoices, RADIO_VOICES_EVENT } from "@/lib/radio-voice-store";
 
 type RadioTrack = {
   id: string;
@@ -65,7 +70,7 @@ async function resolvePlayableUrl(raw: string, revokeRef: { current: string }): 
   return raw;
 }
 
-async function loadRadioGroups(): Promise<RadioGroup[]> {
+async function loadRadioGroups(order: "asc" | "desc"): Promise<RadioGroup[]> {
   const [messages, sessions] = await Promise.all([
     chatDb.messages.orderBy("createdAt").reverse().limit(4000).toArray(),
     chatDb.sessions.toArray(),
@@ -126,10 +131,53 @@ async function loadRadioGroups(): Promise<RadioGroup[]> {
     });
   }
 
+  // 漫卷：每条消息的逐帧语音都收进来，id 带帧序号避免同一条消息多帧互相覆盖
+  try {
+    await hydrateVnStorage();
+    const vnSessionById = new Map(loadVnSessions().map(session => [session.id, session]));
+    for (const message of loadAllVnMessages()) {
+      if (!message.frameAudio) continue;
+      const session = vnSessionById.get(message.sessionId);
+      const characterId = session?.characterId;
+      if (!characterId) continue;
+      const character = characterById.get(characterId);
+      const avatar = character?.avatar && character.avatar !== "none" ? character.avatar : undefined;
+      for (const [frameIndex, frame] of Object.entries(message.frameAudio)) {
+        if (!frame?.audioDataUrl) continue;
+        pushTrack({
+          id: `vn:${message.id}:${frameIndex}`,
+          characterId,
+          characterName: character?.name || "漫卷角色",
+          characterAvatar: avatar,
+          text: frame.synthesizedFromText || "",
+          mediaUrl: frame.audioDataUrl,
+          createdAt: frame.updatedAt || message.createdAt,
+        });
+      }
+    }
+  } catch {
+    /* 漫卷数据读不出来不影响其它来源 */
+  }
+
+  // 剧情、共筑小屋、自习室等 App 合成后主动收进电台的语音
+  for (const record of loadRadioVoices()) {
+    pushTrack({
+      id: record.id,
+      characterId: record.characterId,
+      characterName: record.characterName,
+      characterAvatar: record.characterAvatar,
+      text: record.text,
+      mediaUrl: record.mediaUrl,
+      createdAt: record.createdAt,
+    });
+  }
+
   return [...groups.values()]
     .map(group => ({
       ...group,
-      tracks: group.tracks.sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+      tracks: group.tracks.sort((a, b) => order === "asc"
+        ? a.createdAt.localeCompare(b.createdAt)
+        : b.createdAt.localeCompare(a.createdAt)),
     }))
     .filter(group => group.tracks.length > 0)
     .sort((a, b) => a.characterName.localeCompare(b.characterName, "zh-Hans-CN"));
@@ -165,6 +213,7 @@ export function SleepRadioApp({ onClose }: { onClose: () => void }) {
   const [timerMinutes, setTimerMinutes] = useState(0);
   const [timerRemaining, setTimerRemaining] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("asc");
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const revokeRef = useRef("");
@@ -180,10 +229,14 @@ export function SleepRadioApp({ onClose }: { onClose: () => void }) {
 
   const playlist = useMemo(() => {
     if (!activeCharacterId) {
-      return groups.flatMap(group => group.tracks.map(track => ({ ...track, characterName: track.characterName })));
+      // 全部角色的连播按时间顺序走，与当前正/倒序一致
+      return groups
+        .flatMap(group => group.tracks)
+        .slice()
+        .sort((a, b) => sortOrder === "asc" ? a.createdAt.localeCompare(b.createdAt) : b.createdAt.localeCompare(a.createdAt));
     }
     return groups.find(group => group.characterId === activeCharacterId)?.tracks || [];
-  }, [groups, activeCharacterId]);
+  }, [groups, activeCharacterId, sortOrder]);
 
   const playlistRef = useRef(playlist);
   playlistRef.current = playlist;
@@ -193,20 +246,22 @@ export function SleepRadioApp({ onClose }: { onClose: () => void }) {
 
   const refresh = useCallback(async () => {
     try {
-      setGroups(await loadRadioGroups());
+      setGroups(await loadRadioGroups(sortOrder));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [sortOrder]);
 
   useEffect(() => {
     void refresh();
     const onUpdated = () => void refresh();
     window.addEventListener("archive-updated", onUpdated);
     window.addEventListener("chat-messages-updated", onUpdated);
+    window.addEventListener(RADIO_VOICES_EVENT, onUpdated);
     return () => {
       window.removeEventListener("archive-updated", onUpdated);
       window.removeEventListener("chat-messages-updated", onUpdated);
+      window.removeEventListener(RADIO_VOICES_EVENT, onUpdated);
     };
   }, [refresh]);
 
@@ -350,6 +405,15 @@ export function SleepRadioApp({ onClose }: { onClose: () => void }) {
           <ChevronLeft size={20} strokeWidth={2} />
         </button>
         <h1 className="sr-title">睡眠电台</h1>
+        <button
+          type="button"
+          className="sr-sort"
+          onClick={() => setSortOrder(current => current === "asc" ? "desc" : "asc")}
+          aria-label={sortOrder === "asc" ? "切换为倒序" : "切换为正序"}
+        >
+          <ArrowDownUp size={12} strokeWidth={2} />
+          {sortOrder === "asc" ? "正序" : "倒序"}
+        </button>
         <span className="sr-header-note">{totalTracks} 条</span>
       </header>
 
@@ -399,7 +463,7 @@ export function SleepRadioApp({ onClose }: { onClose: () => void }) {
           ) : playlist.length === 0 ? (
             <div className="sr-empty">
               还没有生成过语音
-              <small>在聊天里点一下语音条，合成完成后就会自动收进来</small>
+              <small>聊天、剧情、漫卷等 App 里合成好的语音都会自动收进来</small>
             </div>
           ) : (
             visibleGroups.map(group => (
@@ -505,6 +569,9 @@ const RADIO_STYLES = `
 .sr-back{display:flex;align-items:center;justify-content:center;width:34px;height:34px;border:none;border-radius:50%;
   background:rgba(255,255,255,.08);color:#ece8f6;cursor:pointer}
 .sr-title{margin:0;flex:1;text-align:center;font-size:15px;letter-spacing:.2em;font-weight:600}
+.sr-sort{display:flex;align-items:center;gap:4px;flex:0 0 auto;padding:5px 9px;border-radius:999px;
+  border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.06);color:#cfc9e0;font-size:10.5px;cursor:pointer}
+.sr-sort:active{background:rgba(150,130,235,.3)}
 .sr-header-note{font-size:11px;opacity:.5;min-width:44px;text-align:right}
 .sr-scroll{flex:1;overflow-y:auto;padding:14px 14px 18px}
 .sr-hero{display:flex;align-items:center;gap:12px;padding:14px;border-radius:18px;
