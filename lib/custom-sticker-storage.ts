@@ -290,16 +290,29 @@ export function loadCustomStickers(characterId: string): StickerItem[] {
     return result;
 }
 
-/** Get sticker names for prompt injection. */
+/**
+ * 表情是否真的能渲染出来：必须有 IndexedDB 资源或外链图片。
+ * 只存了名字、缺图的表情包会被这条规则挡在提示词之外，避免角色发出加载失败的表情。
+ */
+export function isStickerUsable(sticker: StickerItem): boolean {
+    return Boolean(sticker.externalUrl?.trim() || sticker.assetId?.trim());
+}
+
+/** 可供角色使用的自定义表情（过滤掉没有图片的条目）。 */
+export function loadUsableCustomStickers(characterId: string): StickerItem[] {
+    return loadCustomStickers(characterId).filter(isStickerUsable);
+}
+
+/** Get sticker names for prompt injection（仅包含能加载出图片的表情）。 */
 export function getCustomStickerNames(characterId: string): string {
-    const stickers = loadCustomStickers(characterId);
+    const stickers = loadUsableCustomStickers(characterId);
     if (stickers.length === 0) return "无可用表情包，该功能不可用";
     return stickers.map(s => s.name).join("，");
 }
 
 /** Get first sticker formatted as [表情包:name], or empty string. */
 export function getCustomStickerExample(characterId: string): string {
-    const stickers = loadCustomStickers(characterId);
+    const stickers = loadUsableCustomStickers(characterId);
     if (stickers.length === 0) return "";
     return `[表情包:${stickers[0].name}]`;
 }

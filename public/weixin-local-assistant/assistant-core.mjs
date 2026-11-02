@@ -1253,7 +1253,8 @@ async function buildLocalReplyItemsFromSegment(segment, runtime) {
   const before = value.slice(0, media.index).trim();
   const after = value.slice(media.index + media.raw.length).trim();
   if (before) out.push(...await buildLocalReplyItemsFromSegment(before, runtime));
-  out.push(await buildLocalMediaReplyItem(media, runtime));
+  const mediaItem = await buildLocalMediaReplyItem(media, runtime);
+  if (mediaItem) out.push(mediaItem);
   if (after) out.push(...await buildLocalReplyItemsFromSegment(after, runtime));
   return out;
 }
@@ -1311,9 +1312,9 @@ function findFirstLocalMediaProtocol(text) {
 async function buildLocalMediaReplyItem(media, runtime) {
   if (media.kind === "sticker") {
     const stickerImage = resolveRuntimeStickerImage(runtime, media.label);
-    if (stickerImage) {
-      return { kind: "image", imageDataUrl: stickerImage, label: media.raw };
-    }
+    // 拿不到真实表情图片就不发：模板占位图在微信里只会显示成一张加载失败的图片。
+    if (!stickerImage) return null;
+    return { kind: "image", imageDataUrl: stickerImage, label: media.raw };
   }
   if (media.kind === "photo") {
     const generatedImage = await generateLocalImageReplyDataUrl(media, runtime).catch((err) => {

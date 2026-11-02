@@ -69,7 +69,7 @@ import { findEnabledToolForSchema, getEnabledTools, type EnabledTool } from "./t
 import { formatToolsForPrompt, formatToolSchema } from "./tool-prompt";
 import { parseToolCalls, parseToolFetches, executeToolCalls, formatToolResults } from "./tool-executor";
 import type { ToolCall, ToolResult } from "./tool-executor";
-import { getCustomStickerNames, getCustomStickerExample } from "./custom-sticker-storage";
+import { getStickerPromptNames, getStickerPromptExample } from "./sticker-data";
 import { formatCustomAppChatDirectivesForPrompt } from "./custom-app-chat-directives";
 import { loadAllTracks } from "./music-storage";
 import { getActiveAppTags } from "./content-tag-utils";
@@ -1947,8 +1947,8 @@ export async function buildChatPromptMessages(
         activateAllWorldBooks: options?.activateAllWorldBooks,
         recentBlocks,
         unifiedRecentItems,
-        customStickerNames: getCustomStickerNames(character.id),
-        customStickerExample: getCustomStickerExample(character.id),
+        customStickerNames: getStickerPromptNames(character.id),
+        customStickerExample: getStickerPromptExample(character.id),
         musicLocal,
         musicCloud,
         musicOnlineHint,

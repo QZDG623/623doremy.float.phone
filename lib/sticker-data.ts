@@ -5,7 +5,7 @@
  * packaged image assets when a pack provides dedicated files.
  */
 
-import { loadCustomStickers } from "./custom-sticker-storage";
+import { loadUsableCustomStickers } from "./custom-sticker-storage";
 
 export interface StickerItem {
     name: string;
@@ -113,7 +113,67 @@ export function isKnownStickerLabel(label: string, characterIds: (string | undef
     if (findStickerByName(name)) return true;
     for (const cid of characterIds) {
         if (!cid) continue;
-        if (loadCustomStickers(cid).some(s => (s.name || "").trim() === name)) return true;
+        if (loadUsableCustomStickers(cid).some(s => (s.name || "").trim() === name)) return true;
     }
     return false;
+}
+
+/** 内置表情（emoji）名称列表，作为自定义表情全部失效时的兜底类别。 */
+export function getBuiltinStickerNameList(): string {
+    return STICKER_PACKS.flatMap(pack => pack.stickers.map(s => s.name)).join("，");
+}
+
+export function getBuiltinStickerExample(): string {
+    const first = STICKER_PACKS[0]?.stickers[0];
+    return `[表情包:${first?.name || "捂脸"}]`;
+}
+
+/**
+ * 提示词里可用的表情包名：优先角色名下能真实加载的自定义表情；
+ * 一个都没有时退回内置 emoji 表情，避免角色只能反复发加载失败的表情。
+ */
+export function getStickerPromptNames(characterId: string): string {
+    const names = loadUsableCustomStickers(characterId)
+        .map(sticker => (sticker.name || "").trim())
+        .filter(Boolean);
+    if (names.length > 0) return names.join("，");
+    return getBuiltinStickerNameList();
+}
+
+export function getStickerPromptExample(characterId: string): string {
+    const first = loadUsableCustomStickers(characterId).find(sticker => (sticker.name || "").trim());
+    return first ? `[表情包:${first.name}]` : getBuiltinStickerExample();
+}
+
+/** 把内置 emoji 表情画成图片 data URL，供微信云端助手当图片发送。 */
+export function buildBuiltinStickerImageMap(): Record<string, string> {
+    if (typeof document === "undefined") return {};
+    const map: Record<string, string> = {};
+    for (const pack of STICKER_PACKS) {
+        for (const sticker of pack.stickers) {
+            const canvas = document.createElement("canvas");
+            canvas.width = 160;
+            canvas.height = 160;
+            const ctx = canvas.getContext("2d");
+            if (!ctx) continue;
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.font = `112px -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif`;
+            ctx.fillText(sticker.emoji, 80, 84);
+            map[sticker.name] = canvas.toDataURL("image/png");
+        }
+    }
+    return map;
+}
+
+/**
+ * 微信云端跑包要用的表情图片表：有可用自定义表情时沿用它们；
+ * 自定义表情全部失效时把内置 emoji 画成图片，保证提示词里给出的表情名都能发出图片。
+ */
+export function resolveStickerImageMapForCloud(
+    characterId: string,
+    customMap: Record<string, string>,
+): Record<string, string> {
+    if (loadUsableCustomStickers(characterId).length > 0) return customMap;
+    return buildBuiltinStickerImageMap();
 }
