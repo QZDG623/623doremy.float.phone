@@ -3,6 +3,7 @@ import { loadBindingConfig, loadImageGenerationSettings, resolveBinding, resolve
 import { applyImageGenerationBinding } from "./image-generation-binding";
 import JSZip from "jszip";
 import { getChatImageFromIndexedDB } from "./chat-asset-storage";
+import { loadCharacters } from "./character-storage";
 import { storeMediaBlob } from "./media-cache-storage";
 import { throwIfAborted } from "./abort-utils";
 import {
@@ -58,8 +59,14 @@ function mergePrompt(description: string, extraPrompt: string): string {
 }
 
 /** 画面描述里出现这些词时，认为画面需要用户本人出镜。 */
-function descriptionImpliesUser(description: string): boolean {
-  return /(?:合照|合影|合拍|双人|两人|我们|一起|和用户|和玩家|和用户本人|抱着用户|牵着用户|与用户|用户出镜|用户本人|对方出镜|同框|自拍合影)/i.test(description);
+function descriptionImpliesUser(description: string, userName = ""): boolean {
+  if (userName && description.includes(userName)) return true;
+  return /(?:合照|合影|合拍|双人|两人|我们|一起|和用户|和玩家|和用户本人|抱着用户|牵着用户|与用户|用户出镜|用户本人|对方出镜|同框|自拍合影|某人|对方|玩家|用户)/i.test(description);
+}
+
+/** 描述里像是有两个人（合照/双人互动），此时角色与用户的参考图都应参与。 */
+function descriptionHasTwoPeople(description: string): boolean {
+  return /(?:合照|合影|合拍|同框|双人|两人|我们|一起|抱着|牵着|怀里|身边|并肩)/.test(description);
 }
 
 function base64ToBlob(b64: string, mimeType: string): Blob {
@@ -829,9 +836,27 @@ export async function generateImageFromConfiguredApi(params: {
   if (!openaiSettings.apiKey.trim() || !openaiSettings.baseUrl.trim() || !openaiSettings.model.trim()) return null;
 
   const reference = params.characterId ? settings.characterReferences?.[params.characterId] : undefined;
+  const characterProfile = params.characterId
+    ? loadCharacters().find(character => character.id === params.characterId)
+    : undefined;
+  const characterName = (characterProfile?.name || "").trim();
+  // 用户参考图：按角色当前绑定的用户身份读取；合照或明确包含用户时使用。
+  const userIdentity = params.characterId ? resolveUserIdentity(params.characterId, params.appId) : null;
+  const userReference = userIdentity ? settings.userReferences?.[userIdentity.id] : undefined;
+  const userName = (userIdentity?.name || "").trim();
+  const shouldUseUserReference = Boolean(
+    userReference?.assetId
+    && userReference.enabled !== false
+    && (params.includeUserReference === true || descriptionImpliesUser(description, userName)),
+  );
+  // 用户单人画面：只挂用户参考图，不挂角色参考图/锚点，避免把用户画成角色。
+  const userOnlyScene = shouldUseUserReference
+    && !descriptionHasTwoPeople(description)
+    && !(characterName && description.includes(characterName));
   // 「非自拍不使用参考图」开关已从生图设置页删除：参考图启用后始终参与生成
   const shouldUseReference = Boolean(
     params.useReferenceImage
+    && !userOnlyScene
     && reference?.assetId
     && reference.enabled !== false,
   );
@@ -844,21 +869,13 @@ export async function generateImageFromConfiguredApi(params: {
     }
   }
   // 角色锚点图：固定配饰/衣物的参考图，与角色参考图一起提交。
-  for (const anchor of reference?.anchors || []) {
+  for (const anchor of shouldUseReference ? (reference?.anchors || []) : []) {
     if (anchor.enabled === false || !anchor.assetId) continue;
     const raw = await getChatImageFromIndexedDB(anchor.assetId);
     throwIfAborted(params.signal);
     if (raw) referenceImageDataUrls.push(await normalizeReferenceImageForEdit(raw));
     if (referenceImageDataUrls.length >= 3) break;
   }
-  // 用户参考图：按角色当前绑定的用户身份读取；合照或明确包含用户时使用。
-  const userIdentity = params.characterId ? resolveUserIdentity(params.characterId, params.appId) : null;
-  const userReference = userIdentity ? settings.userReferences?.[userIdentity.id] : undefined;
-  const shouldUseUserReference = Boolean(
-    userReference?.assetId
-    && userReference.enabled !== false
-    && (params.includeUserReference === true || descriptionImpliesUser(description)),
-  );
   if (shouldUseUserReference && userReference?.assetId) {
     const rawUserImage = await getChatImageFromIndexedDB(userReference.assetId);
     throwIfAborted(params.signal);
@@ -869,15 +886,23 @@ export async function generateImageFromConfiguredApi(params: {
     .filter(anchor => anchor.enabled !== false)
     .map(anchor => [anchor.label.trim(), anchor.description?.trim()].filter(Boolean).join("："))
     .filter(Boolean);
-  const characterPrompt = [
+  const characterPrompt = userOnlyScene ? "" : [
     reference?.featurePrompt?.trim() || "",
     anchorDescriptions.length > 0 ? `固定锚点：${anchorDescriptions.join("、")}` : "",
   ].filter(Boolean).join("\n");
-  const userPromptHint = shouldUseUserReference && referenceImageDataUrls.length > 0
-    ? "\n\n【画面中的用户】请严格参考用户参考图保持用户本人的五官与发型一致。"
+  const safeUserName = userName || "用户本人";
+  const safeCharacterName = characterName || "角色";
+  // 描述里的「某人/对方/用户」直接换成用户姓名，并在提示词里写明身份，避免模型把 user 画成 char。
+  const describedScene = userOnlyScene
+    ? description.replace(/(?:某人|对方|用户本人|用户|玩家)/g, safeUserName)
+    : description;
+  const identityHint = shouldUseUserReference
+    ? userOnlyScene
+      ? `\n\n【画面中的人物】${safeUserName}（用户本人）。请只参考用户参考图，保持用户本人的五官与发型，绝对不要画成${safeCharacterName}。`
+      : `\n\n【画面中的人物】角色：${safeCharacterName}；用户：${safeUserName}。提交的参考图依次为角色外貌、角色配饰/衣物、用户本人，请按姓名对应身份，不要把用户画成角色。`
     : "";
   const prompt = mergePrompt(
-    `${characterPrompt ? `${description}\n\n【角色固定外观】${characterPrompt}` : description}${userPromptHint}`,
+    `${characterPrompt ? `${describedScene}\n\n【角色固定外观】${characterPrompt}` : describedScene}${identityHint}`,
     openaiSettings.extraPrompt,
   );
 

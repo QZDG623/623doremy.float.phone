@@ -1300,9 +1300,9 @@ const LOCAL_MEDIA_PROTOCOLS = [
   { kind: "transfer", regex: /\[转账\s*[：:]\s*\d+(?:\.\d+)?\s*[：:][^\]]*\]/ },
   { kind: "location", regex: /\[位置\s*[：:]\s*([^\]]+)\]/ },
   { kind: "music", regex: /\[音乐(?:分享)?\s*[：:]\s*([^\]]+)\]/ },
-  { kind: "voice", regex: /\[语音条\s*[：:]\s*([^\]]+)\]/ },
-  { kind: "sticker", regex: /\[表情包\s*[：:]\s*([^\]]+)\]/ },
-  { kind: "photo", regex: /\[照片\s*[：:]\s*(?:(使用参考图|不使用参考图)\s*[：:]\s*)?([^\]]+)\]/ },
+  { kind: "voice", regex: /\[语音条\s*[：:]\s*([^\]]+?)(?:\]|$)/ },
+  { kind: "sticker", regex: /\[表情包\s*[：:]\s*([^\]]+?)(?:\]|$)/ },
+  { kind: "photo", regex: /\[照片\s*[：:]\s*(?:(使用参考图|不使用参考图)\s*[：:]\s*)?([^\]]+?)(?:\]|$)/ },
 ];
 
 function findFirstLocalMediaProtocol(text) {
@@ -1559,7 +1559,13 @@ function cleanVoiceTranscript(text) {
     .split(/\n+/)
     .map(line => {
       const bar = line.indexOf("|");
-      return (bar >= 0 ? line.slice(0, bar) : line).trim();
+      const spoken = bar >= 0 ? line.slice(0, bar) : line;
+      // 去掉角色括号里的拟声词与 <#0.5#> 停顿标记：有的 TTS 会把这些念出来，听感像内容残缺。
+      return spoken
+        .replace(/<\s*#[^>]*#\s*>/g, "")
+        .replace(/[（(]\s*(?:breath|sigh|laugh|laughs|chuckle|sniff|cough|whisper|pause|exhale|inhale)\s*[）)]/gi, "")
+        .replace(/\s{2,}/g, " ")
+        .trim();
     })
     .filter(Boolean)
     .join("\n")
@@ -1812,7 +1818,7 @@ async function sendIlinkVoiceMessage(botToken, raw, audioDataUrl, duration) {
         type: 4,
         file_item: {
           media: { encrypt_query_param: upload.downloadParam, aes_key: encodeMessageAesKey(upload.aeskey), encrypt_type: 1 },
-          file_name: "voice.mp3",
+          file_name: "语音条.mp3",
           file_size: audio.length,
           file_ext: "mp3",
           duration: Number(duration) || undefined,

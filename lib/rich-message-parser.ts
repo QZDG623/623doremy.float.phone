@@ -249,7 +249,7 @@ const RICH_PATTERNS: {
         }),
     },
     {
-        regex: new RegExp(`\\[照片${C}(使用参考图|不使用参考图)${C}([^\\]]+)\\]`),
+        regex: new RegExp(`\\[照片${C}(使用参考图|不使用参考图)${C}([^\\]]+?)(?:\\]|$)`),
         build: (m) => ({
             content: "",
             mediaType: "image",
@@ -257,7 +257,7 @@ const RICH_PATTERNS: {
         }),
     },
     {
-        regex: new RegExp(`\\[照片${C}([^\\]]+)\\]`),
+        regex: new RegExp(`\\[照片${C}([^\\]]+?)(?:\\]|$)`),
         build: (m) => {
             const label = m[1].trim();
             return {
@@ -287,7 +287,7 @@ const RICH_PATTERNS: {
         }),
     },
     {
-        regex: new RegExp(`\\[表情包${C}([^\\]]+)\\]`),
+        regex: new RegExp(`\\[表情包${C}([^\\]]+?)(?:\\]|$)`),
         build: (m) => {
             const name = m[1].trim();
             return {
@@ -333,8 +333,8 @@ const RICH_PATTERNS: {
         },
     },
     {
-        // [语音条:文字内容] — voice message
-        regex: new RegExp(`\\[语音条${C}([^\\]]+)\\]`),
+        // [语音条:文字内容] — voice message（生成被截断、缺少右括号时也按语音处理）
+        regex: new RegExp(`\\[语音条${C}([^\\]]+?)(?:\\]|$)`),
         build: (m) => ({
             content: "",
             mediaType: "audio" as const,

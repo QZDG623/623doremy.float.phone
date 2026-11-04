@@ -68,6 +68,12 @@ function getVoiceSpeechText(transcript: string): string {
     return transcript
         .split(/\n+/)
         .map(line => splitBilingualText(line)?.original || line)
+        .map(line => line
+            .replace(/<\s*#[^>]*#\s*>/g, "")
+            .replace(/[（(]\s*(?:breath|sigh|laugh|laughs|chuckle|sniff|cough|whisper|pause|exhale|inhale)\s*[）)]/gi, "")
+            .replace(/\s{2,}/g, " ")
+            .trim())
+        .filter(Boolean)
         .join("\n")
         .trim();
 }
