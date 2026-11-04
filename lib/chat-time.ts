@@ -1,5 +1,3 @@
-const WEEKDAY_NAMES = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
-
 function padTwo(n: number): string {
     return n < 10 ? `0${n}` : `${n}`;
 }
@@ -8,27 +6,8 @@ export function formatChatUiTime(dateStr: string): string {
     const date = new Date(dateStr);
     if (Number.isNaN(date.getTime())) return "";
 
-    const now = new Date();
     const hhmm = `${padTwo(date.getHours())}:${padTwo(date.getMinutes())}`;
-
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const yesterdayStart = new Date(todayStart.getTime() - 86400000);
-
-    if (date.getTime() >= todayStart.getTime()) {
-        return hhmm;
-    }
-    if (date.getTime() >= yesterdayStart.getTime()) {
-        return `昨天 ${hhmm}`;
-    }
-
-    const sevenDaysAgo = new Date(todayStart.getTime() - 6 * 86400000);
-    if (date.getTime() >= sevenDaysAgo.getTime()) {
-        return `${WEEKDAY_NAMES[date.getDay()]} ${hhmm}`;
-    }
-
-    if (date.getFullYear() === now.getFullYear()) {
-        return `${date.getMonth() + 1}月${date.getDate()}日 ${hhmm}`;
-    }
-
+    // 统一显示完整日期：今天/昨天/星期几的简写会让人（和模型）误判时间跨度，
+    // 这里一律用「某年某月某日 某时:某分」。
     return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ${hhmm}`;
 }

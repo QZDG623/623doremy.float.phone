@@ -867,7 +867,8 @@ async function partToWeixinOutgoing(part: ParsedMessagePart, charName: string, c
                 console.warn("[WeixinBridge] voice synthesis failed:", err);
             }
         }
-        return fallbackImageDataUrl ? { kind: "image", imageDataUrl: fallbackImageDataUrl } : { kind: "text", text: `语音：${transcript}` };
+        // 合成失败时不再发绿色语音模板卡（微信里只是一张不能播放的图片）。
+        return null;
     }
     const card = await renderMediaCard(part, charName);
     if (card) return { kind: "image", imageDataUrl: card };

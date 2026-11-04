@@ -269,10 +269,13 @@ export function loadStickerPacksForCharacters(characterIds: string[]): StickerPa
     const ids = new Set(characterIds.filter(Boolean));
     if (ids.size === 0) return [];
     const assignments = readAssignments();
-    return readPacks().filter(pack => {
+    const assigned = readPacks().filter(pack => {
         const assignedIds = assignments[pack.id] ?? [];
         return assignedIds.some(id => ids.has(id));
     });
+    // 没有给任何角色绑定表情包时（新建/删除后重新导入的包常常还没绑定），
+    // 默认让角色使用全部表情包，避免「表情库能加载、角色却发不出来」。
+    return assigned.length > 0 ? assigned : readPacks();
 }
 
 // ── Character-facing API (used by engines, renderer, emoji panel) ──
@@ -280,14 +283,15 @@ export function loadStickerPacksForCharacters(characterIds: string[]): StickerPa
 /** Aggregate all stickers from packs assigned to this character. */
 export function loadCustomStickers(characterId: string): StickerItem[] {
     const packIds = getCharacterPackIds(characterId);
-    if (packIds.length === 0) return [];
     const packs = readPacks();
     const result: StickerItem[] = [];
     for (const pid of packIds) {
         const pack = packs.find(p => p.id === pid);
         if (pack) result.push(...pack.stickers);
     }
-    return result;
+    // 完全没有绑定，或绑定的包都已被删除时，退回全部表情包——
+    // 否则「表情库能正常加载、角色却只能发文字」。
+    return result.length > 0 ? result : packs.flatMap(pack => pack.stickers);
 }
 
 /**

@@ -1663,10 +1663,16 @@ function StickerBubble({ msg, characterId }: { msg: ChatMessage; characterId?: s
             </div>
         );
     }
-    // 3. No match — show label as styled tag
+    // 3. No match — the sticker image/name is no longer available. Never fall back to
+    //    raw `[label]` text: show a neutral placeholder instead so deleted stickers
+    //    can't leak out as chat text.
     return (
-        <div className="chat-sticker chat-sticker-fallback px-4 py-2 ts-14 text-[var(--c-text)] bg-black/5 rounded-lg text-center">
-            [{label || "表情包"}]
+        <div className="chat-sticker chat-sticker-fallback sticker-bounce px-3 py-3" title="表情包已失效">
+            <svg width="72" height="72" viewBox="0 0 72 72" fill="none" aria-hidden="true">
+                <rect x="14" y="18" width="44" height="36" rx="7" fill="currentColor" opacity="0.12" />
+                <circle cx="28" cy="31" r="4" fill="currentColor" opacity="0.35" />
+                <path d="M18 48l12-11 8 7 10-9 8 13" stroke="currentColor" strokeOpacity="0.35" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
         </div>
     );
 }

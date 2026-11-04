@@ -21,7 +21,7 @@
 import { isWithinPushQuietHours } from "../push-client";
 import { processBridgeItem } from "../reality-bridge/engine";
 import type { BridgeItem } from "../reality-bridge/types";
-import { ensureShellOverlayListener, subscribeShellOverlayEvents } from "../shell-call-overlay";
+import { ensureShellOverlayListener, subscribeShellOverlayEvents, type ShellOverlayEvent } from "../shell-call-overlay";
 import { sendShellNotification } from "../shell-notify";
 import { bringAppToFront, supportsAppGuard, syncAppGuardToNative } from "./app-guard";
 import {
@@ -955,6 +955,24 @@ function onForegroundApp(pkg: string): void {
   }, state);
 }
 
+/**
+ * 原生应用守卫的处置回传：让角色也能感知到「用太久被拦下」，
+ * 而不是只有一块冷冰冰的遮罩。
+ */
+function onAppGuardEvent(event: ShellOverlayEvent): void {
+  if (event.kind !== "overuse") return;
+  const config = loadPerceptionConfig();
+  if (!config.enabled) return;
+  const label = event.label?.trim() || event.package?.trim() || "这个应用";
+  const minutes = event.minutes && event.minutes > 0 ? `连续用了 ${event.minutes} 分钟` : "用太久了";
+  const state = loadPerceptionState();
+  void emitSignal({
+    capability: "foregroundApp",
+    type: "用太久",
+    payload: `${label}${minutes}`,
+  }, state);
+}
+
 // ── 回到手机（回归信号）──
 //
 // 需求：用户离开小手机一段时间再回来，角色应该能察觉到「TA 回来了」。
@@ -1076,6 +1094,8 @@ export async function startPerception(): Promise<void> {
   ensureShellOverlayListener();
   unsubscribeForeground = subscribeShellOverlayEvents(event => {
     if (event.action === "foregroundApp" && event.package) onForegroundApp(event.package);
+    // 原生守卫处置「用太久」时回传一条事件，让角色能感知到并做出反应
+    if (event.action === "appGuard") onAppGuardEvent(event);
   });
 
   // 前后台切换 → 「回到手机」信号。与页面可见性绑定而非 focus 事件：

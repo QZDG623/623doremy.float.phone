@@ -127,7 +127,7 @@ export function buildCharacterTimeContext(timeZone?: string | null, now = new Da
       characterTime: "",
       characterWeekday: "",
       characterTimeZone: "",
-      timeContext: `当前系统时间：${systemTime}，${systemWeekday}`,
+      timeContext: `当前系统时间：${systemTime}，${systemWeekday}\n所有时间以真实系统时间为准：不要自行编造日期或时间，也不要补写没有发生过的对话或事件。`,
       hasDifference: false,
     };
   }
@@ -145,9 +145,36 @@ export function buildCharacterTimeContext(timeZone?: string | null, now = new Da
       `当前系统时间：${systemTime} ${systemTimeZone}，${systemWeekday}`,
       `角色本地时间：${characterTime} ${normalizedTimeZone}，${characterWeekday}`,
       "判断角色作息、问候、深夜/清晨/工作时间时，优先使用角色本地时间。",
+      "所有时间以真实系统时间为准：不要自行编造日期或时间，也不要补写没有发生过的对话或事件。",
     ].join("\n"),
     hasDifference: true,
   };
+}
+
+/**
+ * 用户离开时长提示：让角色按真实时间感知“多久没聊”，而不是自行补写这段时间。
+ */
+export function buildIdleGapContext(lastUserMessageAt: string | null | undefined, now = new Date()): string {
+  if (!lastUserMessageAt) return "";
+  const last = new Date(lastUserMessageAt);
+  if (Number.isNaN(last.getTime())) return "";
+  const diffMs = Math.max(0, now.getTime() - last.getTime());
+  const minutes = Math.floor(diffMs / 60000);
+  if (minutes < 1) return "";
+
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+  const elapsed = days > 0
+    ? `${days}天${hours % 24}小时`
+    : hours > 0
+      ? `${hours}小时${minutes % 60}分钟`
+      : `${minutes}分钟`;
+  const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
+  const lastLabel = `${last.getFullYear()}年${last.getMonth() + 1}月${last.getDate()}日 ${pad(last.getHours())}:${pad(last.getMinutes())}`;
+  return [
+    `距用户上一条消息已过去 ${elapsed}（最后一条用户消息：${lastLabel}）。`,
+    "这段时间是真实流逝的：不要把它当成刚刚发生，也不要自行补写这段时间里没有发生过的对话、事件或时间。",
+  ].join("");
 }
 
 export function buildGroupTimeContext(members: GroupTimeMember[], now = new Date()): CharacterTimeContext {
@@ -170,7 +197,7 @@ export function buildGroupTimeContext(members: GroupTimeMember[], now = new Date
       characterTime: "",
       characterWeekday: "",
       characterTimeZone: "",
-      timeContext: `当前系统时间：${systemTime}，${systemWeekday}`,
+      timeContext: `当前系统时间：${systemTime}，${systemWeekday}\n所有时间以真实系统时间为准：不要自行编造日期或时间，也不要补写没有发生过的对话或事件。`,
       hasDifference: false,
     };
   }

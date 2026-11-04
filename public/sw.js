@@ -39,9 +39,9 @@
 //      睡眠电台支持正倒序与汇总所有 App 的语音。
 // v35：聊天信息新增强制开启线下剧情；默认开启见面邀请卡片；聊天发图可让角色自主换头像；
 //      生图支持角色锚点与用户参考图（合照/共同自拍）。
-// v36：表情包只让角色使用能真实加载的图片，全部失效时改用内置 emoji；微信端表情发真实图片、
-//      语音绑定方案失败时兜底其它可用 TTS 方案。
-const CACHE_VERSION = "ai-phone-pwa-v36";
+// v37：表情包只保留能真实加载的；已删除/无图表情从历史与输出中剔除，不再显示文字；
+//      微信语音合成去掉 enableTTS 强校验、失败不再发绿色模板卡；时间戳统一带年月日并注入离开时长。
+const CACHE_VERSION = "ai-phone-pwa-v37";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 

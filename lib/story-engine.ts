@@ -87,9 +87,11 @@ function buildStorySettingsPrompt(settings: StoryCharacterSettings | undefined, 
     proseStyle?.prompt?.trim() ? "" : (settings.proseStylePrompt?.trim() || ""),
     settings.extraPrompt?.trim() || "",
     ...(settings.customPromptEntries || []).filter((item) => item.enabled && item.content.trim()).map((item) => `专属条目【${item.name || "未命名"}】：${item.content.trim()}`),
-    // 尾部开关只控制后续请求是否要求 AI 生成对应内容；关闭时不注入提示词
+    // 尾部开关只控制后续请求是否要求 AI 生成对应内容；关闭时不注入提示词，并明确禁止输出
     settings.generateStatusBar !== false ? (status?.prompt?.trim() || "") : "",
+    settings.generateStatusBar === false ? "本轮不要输出 <story_status> 状态栏内容。" : "",
     settings.generateTheater !== false ? (theater?.prompt?.trim() || "") : "",
+    settings.generateTheater === false ? "本轮不要输出 <story_theater> 小剧场内容。" : "",
   ].filter(Boolean).join("\n");
 }
 
@@ -259,7 +261,16 @@ export async function generateStoryCompletion(
     rawOutput = await sendLLMRequest(apiConfig, preset, llmMessages, regexes, requestMeta, requestOptions);
   }
 
-  const parsed = parseStoryResponse(rawOutput, regexes, {
+  // 尾部开关关闭时，即使模型照着习惯输出了状态栏/小剧场，也在解析前剔除，保证界面上不再出现
+  const blockedOutputTags = [
+    options?.settings?.generateStatusBar === false ? "story_status" : "",
+    options?.settings?.generateTheater === false ? "story_theater" : "",
+  ].filter(Boolean);
+  const outputToParse = blockedOutputTags.length
+    ? stripContextExcludedTags(rawOutput, blockedOutputTags.join(","))
+    : rawOutput;
+
+  const parsed = parseStoryResponse(outputToParse, regexes, {
     summaryTag,
     foldTags: effectiveFoldTags,
     macroEngine,
@@ -296,7 +307,15 @@ async function buildStoryPromptMessages(
   }
 
   const userIdentity = resolveUserIdentity(characterId, "story");
-  const historyMessages = history.map((message) => toHistoryMessage(message, contextExcludedTags));
+  // 尾部开关关闭时，也要从历史里剔除已生成的状态栏/小剧场，否则模型会照着历史继续输出
+  const blockedTailTags = [
+    settings?.generateStatusBar === false ? "story_status" : "",
+    settings?.generateTheater === false ? "story_theater" : "",
+  ].filter(Boolean);
+  const historyExcludedTags = blockedTailTags.length
+    ? [contextExcludedTags, ...blockedTailTags].join(",")
+    : contextExcludedTags;
+  const historyMessages = history.map((message) => toHistoryMessage(message, historyExcludedTags));
   const memConfig = loadMemoryConfig();
   const independent = Boolean(storyMemory?.independent);
   const context = independent

@@ -69,14 +69,14 @@ import { findEnabledToolForSchema, getEnabledTools, type EnabledTool } from "./t
 import { formatToolsForPrompt, formatToolSchema } from "./tool-prompt";
 import { parseToolCalls, parseToolFetches, executeToolCalls, formatToolResults } from "./tool-executor";
 import type { ToolCall, ToolResult } from "./tool-executor";
-import { getStickerPromptNames, getStickerPromptExample } from "./sticker-data";
+import { getStickerPromptNames, getStickerPromptExample, isKnownStickerLabel } from "./sticker-data";
 import { formatCustomAppChatDirectivesForPrompt } from "./custom-app-chat-directives";
 import { loadAllTracks } from "./music-storage";
 import { getActiveAppTags } from "./content-tag-utils";
 import { isNeteaseConfigured, getUserPlaylists, getPlaylistTracks, checkLoginStatus, loadMusicApiConfig } from "./music-service";
 import { buildCalendarScheduleMarker, getCurrentCalendarScheduleForPrompt } from "./calendar-storage";
 import { getWeekStartIso } from "./calendar-utils";
-import { buildCharacterTimeContext } from "./character-time";
+import { buildCharacterTimeContext, buildIdleGapContext } from "./character-time";
 import { getPromptTimestampOptionsForTimeContext } from "./prompt-time";
 import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 import { pushApiLog } from "./api-log-store";
@@ -1924,6 +1924,14 @@ export async function buildChatPromptMessages(
         )
         : "";
 
+    // 让角色感知用户离开/沉默了多久，避免自行编造这段时间发生了什么
+    const lastUserMessageAt = [...promptHistory].reverse()
+        .find(m => m.role === "user" && !m.isRetracted)?.createdAt;
+    const idleGapContext = buildIdleGapContext(lastUserMessageAt, now);
+    const timeContextWithIdle = idleGapContext
+        ? { ...promptTimeContext, timeContext: `${promptTimeContext.timeContext}\n${idleGapContext}` }
+        : promptTimeContext;
+
     const llmMessages = assemblePromptPayload({
         character,
         history: promptHistory,
@@ -1949,10 +1957,12 @@ export async function buildChatPromptMessages(
         unifiedRecentItems,
         customStickerNames: getStickerPromptNames(character.id),
         customStickerExample: getStickerPromptExample(character.id),
+        // 已删除/加载不到的表情不再出现在历史里，避免模型继续照抄旧表情名发文字
+        stickerLabelAllowed: (label: string) => isKnownStickerLabel(label, [character.id]),
         musicLocal,
         musicCloud,
         musicOnlineHint,
-        timeContext: promptTimeContext,
+        timeContext: timeContextWithIdle,
         promptTimestampOptions,
         enableVision: config.enableImageRecognition,
         timeAware: loadChatAppSettings().timeAware,

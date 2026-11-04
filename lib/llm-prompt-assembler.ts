@@ -70,6 +70,8 @@ export interface AssemblerInput {
     unifiedRecentItems?: UnifiedRecentItem[]; // chronological short-term timeline mixing events and surviving history
     customStickerNames?: string;           // comma-separated custom sticker names for {{customStickers}} macro
     customStickerExample?: string;         // e.g. [表情包:小猫疑惑] for {{stickerExample}} macro
+    /** 历史表情包是否还有效；无效（已删除/无图）的会被排除，避免模型照着旧名字继续发文字表情 */
+    stickerLabelAllowed?: (label: string) => boolean;
     musicLocal?: string;                   // local music titles for {{musicLocal}} macro
     musicCloud?: string;                   // netease playlist summary for {{musicCloud}} macro
     musicOnlineHint?: string;              // online search hint for {{musicOnlineHint}} macro
@@ -996,6 +998,11 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
 
             const promptRole = resolveHistoryPromptRole(msg);
             const ts = (timeAware && msg.createdAt) ? formatChatTimestamp(msg.createdAt, promptTimestampOptions) : "";
+            if (msg.mediaType === "sticker" && input.stickerLabelAllowed
+                && !input.stickerLabelAllowed(msg.mediaData?.label || "")) {
+                // 表情已删除/加载不到：从历史里剔除，否则模型每轮都照抄旧表情名。
+                return;
+            }
             const showTs = ts && !(ts === prevTs && promptRole === prevRole);
             prevTs = ts;
             prevRole = promptRole;

@@ -41,7 +41,7 @@ type ShellBridgeLike = {
 };
 
 /** 原生浮窗事件 */
-export type ShellOverlayAction = "restore" | "hangup" | "reply" | "tick" | "needPermission" | "accessibility" | "foregroundApp" | "screenshot" | "checkIn" | "userReply" | "screen-tick";
+export type ShellOverlayAction = "restore" | "hangup" | "reply" | "tick" | "needPermission" | "accessibility" | "foregroundApp" | "screenshot" | "checkIn" | "userReply" | "screen-tick" | "appGuard";
 
 export type ShellOverlayEvent = {
     action: ShellOverlayAction;
@@ -53,6 +53,12 @@ export type ShellOverlayEvent = {
     callId?: string;
     /** action='foregroundApp' 时的前台包名 */
     package?: string;
+    /** action='appGuard'：原生应用守卫的处置类型（overuse/sleep） */
+    kind?: string;
+    /** action='appGuard'：应用显示名 */
+    label?: string;
+    /** action='appGuard'：连续使用分钟数 */
+    minutes?: number;
     /** action='screenshot'：截屏是否成功 */
     ok?: boolean;
     /** action='screenshot' 失败时的原因 */
@@ -69,8 +75,6 @@ export type ShellOverlayEvent = {
     characterId?: string;
     /** action='checkIn'：用户是否同意给角色看 */
     accepted?: boolean;
-    /** action='checkIn' accepted=true 时的 PNG base64 */
-    base64?: string;
     /** action='checkIn' 用户在浮层回复框里顺手说的话（可选） */
     reply?: string;
     /** action='userReply'：用户从通知栏直接回复，待发消息落在哪个会话 */

@@ -1,5 +1,6 @@
 package app.floatphone.shell
 
+import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
@@ -83,14 +84,22 @@ class AppGuard(private val context: Context) {
         @Volatile
         private var liveInstance: AppGuard? = null
 
+        /**
+         * 无障碍服务里的实例：只有它能真正添加 TYPE_ACCESSIBILITY_OVERLAY 遮罩。
+         * Activity 里的实例也能写配置，但用它锁定会 BadTokenException。
+         */
+        @Volatile
+        private var serviceInstance: AppGuard? = null
+
         private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
 
-        /** 定时检查「连续用太久」的看门狗。 */
-        private val watchdog = Runnable { liveInstance?.watchdogTick() }
+        /** 定时检查「连续用太久」的看门狗；优先用服务实例执行处置。 */
+        private val watchdog = Runnable { (serviceInstance ?: liveInstance)?.watchdogTick() }
     }
 
     init {
         liveInstance = this
+        if (context is AccessibilityService) serviceInstance = this
     }
 
     // ── 配置读写 ──
@@ -250,6 +259,16 @@ class AppGuard(private val context: Context) {
         if (overuseHandledPkg == pkg && now - overuseHandledAt < OVERUSE_COOLDOWN_MS) return
         overuseHandledPkg = pkg
         overuseHandledAt = now
+
+        // 回传一条事件给网页：角色可以根据「用太久」感知并主动发消息
+        ShellBus.dispatchOverlayEvent(
+            "appGuard",
+            JSONObject()
+                .put("kind", "overuse")
+                .put("package", pkg)
+                .put("label", label)
+                .put("minutes", minutes),
+        )
 
         // 单独列为「直接锁定」的应用不看全局动作；其余按 overuseAction。
         if (forceLock || root.optString("overuseAction", "return") == "lock") {

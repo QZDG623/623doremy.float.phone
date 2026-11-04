@@ -1759,15 +1759,15 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         });
     }, [activeRegexes, displayRegexMacroEngine, getRegexActiveTags]);
 
-    // 「丢弃角色输出的无效表情包」开关：滤除名称不在角色表情包/内置表情中的 sticker part
+    // 角色输出的表情包必须真实可用：名称不在角色表情包/内置表情中的 sticker part 一律丢弃，
+    // 否则会显示成 `[表情包名]` 文字（已删除的表情包也会以文字形式漏出来）。
     const stripInvalidStickerParts = useCallback((parts: ParsedMessagePart[], senderCharacterId?: string): ParsedMessagePart[] => {
-        if (session.discardInvalidStickers !== true) return parts;
         const characterIds = senderCharacterId
             ? [senderCharacterId]
             : (session.isGroup ? (session.participantIds ?? []) : [session.contactId]);
         return parts.filter(part => part.mediaType !== "sticker"
             || isKnownStickerLabel(part.mediaData?.label || "", characterIds));
-    }, [session.discardInvalidStickers, session.isGroup, session.participantIds, session.contactId]);
+    }, [session.isGroup, session.participantIds, session.contactId]);
 
     const normalizeDisplayParts = useCallback((parts: ReturnType<typeof parseAIResponse>["parts"]) => {
         const charN = character?.name || "对方";

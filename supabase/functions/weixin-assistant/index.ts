@@ -1345,12 +1345,12 @@ async function buildLocalMediaReplyItem(media, runtime) {
   if (media.kind === "voice") {
     const transcript = cleanVoiceTranscript(media.label);
     const duration = estimateVoiceDuration(transcript);
-    const fallbackImageDataUrl = getTemplateImageDataUrl("voice");
     const audioDataUrl = await synthesizeVoiceDataUrl(transcript, runtime?.voiceConfig).catch(() => "");
     if (audioDataUrl) {
-      return { kind: "voice", audioDataUrl, transcript, duration, fallbackImageDataUrl };
+      // 发送失败也不再降级成绿色语音模板图（微信里只是一张不能播放的图片）。
+      return { kind: "voice", audioDataUrl, transcript, duration, fallbackImageDataUrl: null };
     }
-    return { kind: "image", imageDataUrl: fallbackImageDataUrl, label: media.raw };
+    return null;
   }
   return {
     kind: "image",
@@ -1577,7 +1577,9 @@ const IMAGE_GENERATION_TIMEOUT_MS = 90_000;
 
 async function synthesizeVoiceDataUrl(text, voiceConfig) {
   const cleanText = String(text || "").trim();
-  if (!cleanText || !voiceConfig || voiceConfig.enableTTS !== true) return "";
+  // 只在明确关闭 TTS 时跳过；同步端传进来的已经是可用候选方案，
+  // 不能再要求 enableTTS === true，否则缺省该字段的方案会被误判成禁用而发绿卡。
+  if (!cleanText || !voiceConfig || voiceConfig.enableTTS === false) return "";
   // 预算不足时跳过 TTS（外层降级为语音模板卡），保证整轮在墙钟内完成；
   // 实际请求超时同样按剩余预算收紧（预留 15s 给上传发送），避免擦到墙钟。
   const budget = remainingReplyBudgetMs();

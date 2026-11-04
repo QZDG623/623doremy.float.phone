@@ -1089,9 +1089,9 @@ export async function parseAndSaveResponse(
     for (const p of parts) {
         if (p.mediaType === "voice_call") { triggerCall = "voice"; continue; }
         if (p.mediaType === "video_call") { triggerCall = "video"; continue; }
-        // 「丢弃角色输出的无效表情包」开关（主动消息路径）
-        if (p.mediaType === "sticker" && sess?.discardInvalidStickers === true) {
-            const senderIds = sess.isGroup ? (sess.participantIds ?? []) : [sess.contactId];
+        // 无效/已删除的表情包一律丢弃，避免以 `[表情包名]` 文字形式发出
+        if (p.mediaType === "sticker") {
+            const senderIds = sess?.isGroup ? (sess.participantIds ?? []) : (sess?.contactId ? [sess.contactId] : []);
             if (!isKnownStickerLabel(p.mediaData?.label || "", senderIds)) continue;
         }
         if (p.mediaType === "accept_red_packet" || p.mediaType === "decline_red_packet"
