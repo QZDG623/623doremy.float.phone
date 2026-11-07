@@ -166,7 +166,7 @@ export type ToolResult = {
     mediaAttachments?: MediaAttachment[];
 };
 
-import { extractBase64Blocks, storeMediaBase64, storeMediaBlob, detectMediaType, MEDIA_STORE_PROTOCOL } from "./media-cache-storage";
+import { extractBase64Blocks, storeMediaBase64, storeMediaBlob, detectMediaType } from "./media-cache-storage";
 
 const MAX_RESULT_LENGTH = 2000;
 const PROXY_URL = "/api/tool-proxy";
@@ -4271,43 +4271,6 @@ const _mcpSseEndpoints = new Map<string, string>(); // serverId → resolved mes
  */
 function isSseUrl(url: string): boolean {
     return url.endsWith("/sse") || url.includes("/sse?");
-}
-
-/**
- * Discover the SSE message endpoint by connecting to the SSE URL.
- * Returns the full message endpoint URL.
- */
-async function discoverSseEndpoint(serverUrl: string, serverId: string, signal?: AbortSignal): Promise<string> {
-    const cached = _mcpSseEndpoints.get(serverId);
-    if (cached) return cached;
-
-    const res = await proxyFetch(serverUrl, { method: "SSE_DISCOVER", signal });
-    const data = JSON.parse(res.text);
-    const endpointPath = data.endpointPath;
-
-    if (!endpointPath) {
-        const debug = data.debug || "";
-        throw new Error(`SSE 服务器未返回 endpoint 路径。收到: ${debug.slice(0, 200)}`);
-    }
-
-    // Resolve relative path against server URL, preserving original query params (like key=xxx)
-    let fullUrl: string;
-    if (endpointPath.startsWith("http")) {
-        fullUrl = endpointPath;
-    } else {
-        const base = new URL(serverUrl);
-        const endpointUrl = new URL(endpointPath, base.origin);
-        // Merge original query params (e.g., key=xxx) into the endpoint URL
-        for (const [k, v] of base.searchParams.entries()) {
-            if (!endpointUrl.searchParams.has(k)) {
-                endpointUrl.searchParams.set(k, v);
-            }
-        }
-        fullUrl = endpointUrl.toString();
-    }
-
-    _mcpSseEndpoints.set(serverId, fullUrl);
-    return fullUrl;
 }
 
 // ── MCP JSON-RPC helper ───────────────────────
