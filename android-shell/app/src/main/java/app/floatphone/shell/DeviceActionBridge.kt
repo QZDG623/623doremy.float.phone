@@ -402,9 +402,10 @@ class DeviceActionBridge(private val context: Context) {
     /**
      * 设一个闹钟。到点由系统的「时钟」App 响铃。
      *
-     * 刻意**带界面**（EXTRA_SKIP_UI=false）：会打开时钟 App 让用户看到并确认。
-     * 静默设闹钟听起来方便，但用户第二天早上被一个「不知道谁设的」闹钟吵醒，
-     * 比根本没设更糟。让系统界面替我们做最终确认，也符合「不神戳戳」。
+     * **静默设置**（EXTRA_SKIP_UI=true）：角色说几点就几点，不再弹系统界面让用户
+     * 二次确认。认账靠备注——EXTRA_MESSAGE 写「角色名 定的闹钟」，用户早上看到
+     * 就知道是谁设的，不会出现「不知道谁设的」闹钟。
+     * 需要调用方在 Manifest 声明 SET_ALARM 权限，否则部分 ROM 会拒绝。
      *
      * @param hour 0-23
      * @param minute 0-59
@@ -418,7 +419,7 @@ class DeviceActionBridge(private val context: Context) {
                 putExtra(AlarmClock.EXTRA_HOUR, hour)
                 putExtra(AlarmClock.EXTRA_MINUTES, minute)
                 if (message.isNotBlank()) putExtra(AlarmClock.EXTRA_MESSAGE, message.take(80))
-                putExtra(AlarmClock.EXTRA_SKIP_UI, false)
+                putExtra(AlarmClock.EXTRA_SKIP_UI, true)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             context.startActivity(intent)
@@ -426,7 +427,7 @@ class DeviceActionBridge(private val context: Context) {
                 .put("ok", true)
                 .put("hour", hour)
                 .put("minute", minute)
-                .put("needsConfirm", true)
+                .put("needsConfirm", false)
         } catch (e: Throwable) {
             // 三种失败分开说，理由见 alarmFailureReason 的注释。
             alarmFailureReason(e, "闹钟")

@@ -1302,7 +1302,10 @@ async function executeDeviceActionTool(call: ToolCall, context?: ToolExecutionCo
         };
     }
 
-    const outcome = runDeviceAction(call.args || {});
+    const character = context?.characterId
+        ? loadCharacters().find(c => c.id === context.characterId)
+        : undefined;
+    const outcome = runDeviceAction(call.args || {}, { actorName: character?.name });
     if (!outcome.ok) {
         // 失败也 persistToHistory=false：不让一条失败的尝试留在历史里
         // 诱导模型下一轮继续纠结同一个动作。
@@ -1322,9 +1325,6 @@ async function executeDeviceActionTool(call: ToolCall, context?: ToolExecutionCo
     // notifyDeviceAction 走的是与角色发消息同一条链路（desktop-shell 统一判断
     // 「是否正在看这个会话」，不是才弹系统通知），所以免打扰规则天然一致。
     try {
-        const character = context?.characterId
-            ? loadCharacters().find(c => c.id === context.characterId)
-            : undefined;
         notifyDeviceAction({
             sessionId: context?.sessionId,
             characterName: character?.name,

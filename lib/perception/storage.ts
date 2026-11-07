@@ -132,6 +132,9 @@ export function loadPerceptionConfig(): PerceptionConfig {
       overuseMessage: typeof parsed.overuseMessage === "string" && parsed.overuseMessage.trim()
         ? parsed.overuseMessage.trim().slice(0, 80)
         : PERCEPTION_DEFAULTS.overuseMessage,
+      overuseSnoozeMessage: typeof parsed.overuseSnoozeMessage === "string" && parsed.overuseSnoozeMessage.trim()
+        ? parsed.overuseSnoozeMessage.trim().slice(0, 80)
+        : PERCEPTION_DEFAULTS.overuseSnoozeMessage,
     };
   } catch {
     return { ...PERCEPTION_DEFAULTS };

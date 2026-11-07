@@ -894,7 +894,7 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
                         <div className="per-field-body">
                           <div className="per-field-label">怎么处置</div>
                           <div className="per-field-hint">
-                            回小手机 = 直接把小手机切回前台；锁定 = 全屏遮罩挡住该应用，只留「回小手机」
+                            回小手机 = 弹遮罩给两个选择（回小手机 / 再刷一会儿），点回小手机直达角色聊天室；锁定 = 全屏遮罩，只能回小手机，并在 15 分钟内反复锁住
                           </div>
                           <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                             <button
@@ -1001,6 +1001,18 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
                           style={{ width: 140 }}
                           value={config.overuseMessage}
                           onChange={e => updatePassive({ overuseMessage: e.target.value })}
+                        />
+                      </div>
+                      <div className="per-field">
+                        <div className="per-field-body">
+                          <div className="per-field-label">再刷一会儿时说什么</div>
+                          <div className="per-field-hint">点「再刷一会儿」后，这句话会以悬浮气泡显示在应用上方（可换成角色的口吻）</div>
+                        </div>
+                        <input
+                          className="per-field-input"
+                          style={{ width: 140 }}
+                          value={config.overuseSnoozeMessage}
+                          onChange={e => updatePassive({ overuseSnoozeMessage: e.target.value })}
                         />
                       </div>
                     </>

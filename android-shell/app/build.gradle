@@ -68,8 +68,8 @@ android {
         //         角色能感知「用太久」并主动反应。
         // 1.0.40：合并上游全部更新（打卡调度、无障碍断连恢复、电池优化检测等），
         //         保留本地全部定制功能。versionCode 需高于双方历史发布值（38/28）。
-        versionCode 39
-        versionName "1.0.40"
+        versionCode 40
+        versionName "1.0.41"
         buildConfigField "String", "SITE_URL", "\"${siteUrl}\""
     }
 

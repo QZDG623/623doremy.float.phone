@@ -53,6 +53,7 @@ export function syncAppGuardToNative(config: PerceptionConfig): void {
       overuseApps: config.overuseApps,
       overuseLockApps: config.overuseLockApps,
       overuseMessage: config.overuseMessage,
+      overuseSnoozeMessage: config.overuseSnoozeMessage,
     }));
   } catch {
     // 桥异常绝不能让感知引擎启动失败

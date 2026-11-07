@@ -41,8 +41,8 @@
 //      生图支持角色锚点与用户参考图（合照/共同自拍）。
 // v37：表情包只保留能真实加载的；已删除/无图表情从历史与输出中剔除，不再显示文字；
 //      微信语音合成去掉 enableTTS 强校验、失败不再发绿色模板卡；时间戳统一带年月日并注入离开时长。
-// v39：合并上游 main 全部更新（打卡/无障碍/电池优化等），设备需丢弃旧 JS。
-const CACHE_VERSION = "ai-phone-pwa-v39";
+// v40：超时处置改为双选项 + 真正锁应用、闹钟静默设置、Fish 语音恢复。
+const CACHE_VERSION = "ai-phone-pwa-v40";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 

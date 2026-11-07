@@ -48,6 +48,12 @@ class AppGuard(private val context: Context) {
         /** 处置过后多久内不再重复处置，避免刚拉回去又被立刻再拉一次。 */
         private const val OVERUSE_COOLDOWN_MS = 5 * 60 * 1000L
 
+        /** 判定为「用太久」后，应用再次回到前台时立刻续锁的窗口期（防止按 Home 绕过）。 */
+        private const val STICKY_LOCK_MS = 15 * 60 * 1000L
+
+        /** 「再刷一会儿」气泡停留时长。 */
+        private const val BUBBLE_MS = 8000L
+
         @Volatile
         private var overlayView: View? = null
 
@@ -75,6 +81,30 @@ class AppGuard(private val context: Context) {
         /** 正在被「用太久 → 锁定」的应用包名；空串 = 没有锁定。 */
         @Volatile
         private var lockedPkg = ""
+
+        /**
+         * 已判定为「用太久」而需要锁定的应用，以及解除时刻。
+         *
+         * 只靠 lockedPkg 不够：用户按 Home 再回来，前台计时会重新起算，
+         * 3 分钟的限制就被绕过去了（这正是「小红书没被锁住」的原因之一）。
+         */
+        @Volatile
+        private var stickyLockPkg = ""
+        @Volatile
+        private var stickyLockUntil = 0L
+
+        /**
+         * 当前遮罩的种类："" / "sleep" / "overuse_lock" / "overuse_choice"。
+         *
+         * 必须区分开：以前任何一次前台事件都会 postDismiss()，
+         * 而应用内部的窗口切换也会派发前台事件——于是锁定遮罩刚弹出就被自己关掉。
+         */
+        @Volatile
+        private var overlayKind = ""
+
+        /** 悬浮气泡（「再刷一会儿」时角色说一句话），与全屏遮罩互不干扰。 */
+        @Volatile
+        private var bubbleView: View? = null
 
         /** 「用太久」定时检查是否已在跑，防止重复投递。 */
         @Volatile
@@ -144,8 +174,10 @@ class AppGuard(private val context: Context) {
         }
 
         if (pkg == SELF_PACKAGE) {
-            // 回到小手机：锁定自然解除
+            // 回到小手机：锁定自然解除（用户已经照做了，下次重新计时）
             lockedPkg = ""
+            stickyLockPkg = ""
+            stickyLockUntil = 0L
             // 遮罩自己的窗口也可能派发事件，刚弹出时忽略，避免自关。
             if (overlayView == null || System.currentTimeMillis() - overlayShownAt > OVERLAY_GRACE_MS) {
                 postDismiss()
@@ -180,7 +212,9 @@ class AppGuard(private val context: Context) {
                 return
             }
         } else {
-            postDismiss()
+            // 只收起睡眠遮罩。「用太久」的锁定/选择遮罩必须留着，
+            // 否则应用内部的每一次窗口切换都会把它顺手关掉。
+            dismissSleepOverlay()
         }
 
         if (root.optBoolean("returnToFloat", false) &&
@@ -203,6 +237,26 @@ class AppGuard(private val context: Context) {
         true
     } catch (e: Throwable) {
         // 后台启动 Activity 在某些 ROM 上会被拦；失败就保持现状，不崩服务。
+        false
+    }
+
+    /**
+     * 把小手机拉回前台，并直接落在「角色聊天室」。
+     *
+     * 用 #open-chat=last：守卫不知道用户最近跟谁聊，交给网页挑最近更新的会话。
+     */
+    fun bringToFrontToChat(): Boolean = try {
+        val url = "${MainActivity.SITE_URL.trimEnd('/')}/#open-chat=last"
+        val intent = Intent(context, MainActivity::class.java)
+            .addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK
+                    or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT,
+            )
+            .putExtra(MainActivity.EXTRA_OPEN_URL, url)
+        context.startActivity(intent)
+        true
+    } catch (e: Throwable) {
         false
     }
 
@@ -253,10 +307,15 @@ class AppGuard(private val context: Context) {
         val forceLock = matches(lockList, pkg, label)
         if (!watchAll && !matches(list, pkg, label) && !forceLock) return
 
-        if (System.currentTimeMillis() - since < minutes * 60_000L) return
-
         val now = System.currentTimeMillis()
-        if (overuseHandledPkg == pkg && now - overuseHandledAt < OVERUSE_COOLDOWN_MS) return
+        // 单独列为「直接锁定」的应用不看全局动作；其余按 overuseAction。
+        val lockMode = forceLock || root.optString("overuseAction", "return") == "lock"
+        // 已经判定过要锁的应用，离开再回来立刻继续锁——否则按 Home 绕一圈
+        // 前台计时就重新起算，「锁定」形同虚设。
+        val sticky = lockMode && stickyLockPkg == pkg && now < stickyLockUntil
+
+        if (!sticky && now - since < minutes * 60_000L) return
+        if (!lockMode && overuseHandledPkg == pkg && now - overuseHandledAt < OVERUSE_COOLDOWN_MS) return
         overuseHandledPkg = pkg
         overuseHandledAt = now
 
@@ -270,17 +329,44 @@ class AppGuard(private val context: Context) {
                 .put("minutes", minutes),
         )
 
-        // 单独列为「直接锁定」的应用不看全局动作；其余按 overuseAction。
-        if (forceLock || root.optString("overuseAction", "return") == "lock") {
+        val message = root.optString("overuseMessage", "这个应用用太久了，先回小手机歇一会儿吧。")
+
+        if (lockMode) {
             lockedPkg = pkg
+            stickyLockPkg = pkg
+            stickyLockUntil = now + STICKY_LOCK_MS
             showOverlay(
-                "先歇一会儿",
-                root.optString("overuseMessage", "这个应用用太久了，先回小手机歇一会儿吧。"),
-                allowSnooze = false,
+                titleText = "先歇一会儿",
+                message = message,
+                kind = "overuse_lock",
+                primaryText = "回小手机",
+                primary = {
+                    dismissNow(resetLock = true)
+                    bringToFrontToChat()
+                },
+                secondaryText = null,
+                secondary = null,
             )
         } else {
-            // 拉回小手机：回到小手机后计时自然重置
-            bringToFront()
+            // 两个选项：回小手机（直达角色聊天室）/ 再刷一会儿（角色气泡说句话）
+            showOverlay(
+                titleText = "先歇一会儿",
+                message = message,
+                kind = "overuse_choice",
+                primaryText = "回小手机",
+                primary = {
+                    dismissNow(resetLock = true)
+                    bringToFrontToChat()
+                },
+                secondaryText = "再刷一会儿",
+                secondary = {
+                    // 重新给一段完整时长，而不是过完冷却期立刻又被判超时
+                    foregroundSince = System.currentTimeMillis()
+                    overuseHandledPkg = ""
+                    dismissNow(resetLock = true)
+                    showBubble(root.optString("overuseSnoozeMessage", "好嘛，那就再刷一会儿，记得早点回来。"))
+                },
+            )
         }
     }
 
@@ -332,18 +418,43 @@ class AppGuard(private val context: Context) {
      * 「悬浮窗」权限，也不会被系统当成应用窗口限制。
      */
     private fun showSleepOverlay(message: String) {
-        showOverlay("该睡觉了", message, allowSnooze = true)
+        showOverlay(
+            titleText = "该睡觉了",
+            message = message,
+            kind = "sleep",
+            primaryText = "回小手机",
+            primary = {
+                dismissNow(resetLock = true)
+                bringToFront()
+            },
+            secondaryText = "再用 5 分钟",
+            secondary = {
+                snoozeUntil = System.currentTimeMillis() + SNOOZE_MS
+                dismissNow(resetLock = true)
+            },
+        )
     }
 
     /**
      * 全屏遮罩的通用实现。
      *
-     * allowSnooze = true 时给一个「再用 5 分钟」的出口（睡眠锁）；
-     * 「用太久 → 锁定」不给这个出口——用户要的正是「强行锁定」。
+     * kind 决定遮罩的生命周期：睡眠遮罩会在离开睡眠时段后收起，
+     * 「用太久」的遮罩只由用户点按钮或离开该应用时收起。
      */
-    private fun showOverlay(titleText: String, message: String, allowSnooze: Boolean) {
+    private fun showOverlay(
+        titleText: String,
+        message: String,
+        kind: String,
+        primaryText: String,
+        primary: () -> Unit,
+        secondaryText: String?,
+        secondary: (() -> Unit)?,
+    ) {
         mainHandler.post {
-            if (overlayView != null) return@post
+            if (overlayView != null) {
+                // 已经有一个全屏遮罩：不叠加。若种类相同就保持现状。
+                return@post
+            }
             val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
                 ?: return@post
             val root = LinearLayout(context).apply {
@@ -370,11 +481,8 @@ class AppGuard(private val context: Context) {
                 setPadding(0, dp(14), 0, dp(28))
             }
             val backButton = Button(context).apply {
-                text = "回小手机"
-                setOnClickListener {
-                    postDismiss()
-                    bringToFront()
-                }
+                text = primaryText
+                setOnClickListener { primary() }
             }
             root.addView(title, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -387,15 +495,12 @@ class AppGuard(private val context: Context) {
             root.addView(backButton, LinearLayout.LayoutParams(dp(200), dp(48)).apply {
                 topMargin = dp(10)
             })
-            if (allowSnooze) {
-                val snoozeButton = Button(context).apply {
-                    text = "再用 5 分钟"
-                    setOnClickListener {
-                        snoozeUntil = System.currentTimeMillis() + SNOOZE_MS
-                        postDismiss()
-                    }
+            if (secondaryText != null && secondary != null) {
+                val secondButton = Button(context).apply {
+                    text = secondaryText
+                    setOnClickListener { secondary() }
                 }
-                root.addView(snoozeButton, LinearLayout.LayoutParams(dp(200), dp(48)).apply {
+                root.addView(secondButton, LinearLayout.LayoutParams(dp(200), dp(48)).apply {
                     topMargin = dp(10)
                 })
             }
@@ -420,30 +525,119 @@ class AppGuard(private val context: Context) {
             try {
                 windowManager.addView(root, params)
                 overlayView = root
+                overlayKind = kind
                 overlayShownAt = System.currentTimeMillis()
             } catch (e: Throwable) {
                 // 加不上就算了：绝不能因为一个遮罩让无障碍服务崩掉
                 overlayView = null
+                overlayKind = ""
             }
         }
     }
 
-    /** 收起遮罩（可以在任意线程调用）。 */
-    private fun postDismiss() {
-        mainHandler.post { dismissNow() }
+    /** 只收起睡眠遮罩；「用太久」的遮罩不动，也不会顺手清掉锁定状态。 */
+    private fun dismissSleepOverlay() {
+        if (overlayKind != "sleep") return
+        postDismiss()
     }
 
-    private fun dismissNow() {
-        // 遮罩收起 = 锁定结束；重新进入该应用会重新计时。
-        lockedPkg = ""
+    /** 收起遮罩（可以在任意线程调用）。 */
+    private fun postDismiss() {
+        mainHandler.post { dismissNow(resetLock = true) }
+    }
+
+    private fun dismissNow(resetLock: Boolean) {
+        // 遮罩只可能由无障碍服务实例添加；Activity 实例去 removeView 会抛异常，
+        // 还会把 overlayView 清空、视图却留在屏幕上。这里统一交给真正的持有者。
+        val owner = serviceInstance ?: this
+        if (resetLock) {
+            // 遮罩收起 = 锁定结束；重新进入该应用会重新计时。
+            lockedPkg = ""
+        }
         val view = overlayView ?: return
         overlayView = null
+        overlayKind = ""
         overlayShownAt = 0L
         try {
-            val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+            val windowManager = owner.context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
             windowManager?.removeView(view)
         } catch (e: Throwable) {
             // 视图可能已经被系统移除，忽略
+        }
+    }
+
+    /**
+     * 一个贴在屏幕上方的小气泡：点「再刷一会儿」时角色说一句话。
+     *
+     * 不是全屏、不可点、几秒后自己消失——用户还在刷，气泡只是「被看见」，
+     * 不该挡住内容，也不该逼用户再点一次。
+     */
+    private fun showBubble(text: String) {
+        val owner = serviceInstance ?: this
+        mainHandler.post {
+            if (text.isBlank()) return@post
+            val windowManager = owner.context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+                ?: return@post
+            if (bubbleView != null) {
+                try {
+                    windowManager.removeView(bubbleView)
+                } catch (_: Throwable) {
+                    // 已经被系统移除
+                }
+                bubbleView = null
+            }
+            val bubble = TextView(owner.context).apply {
+                this.text = text
+                setTextColor(Color.WHITE)
+                textSize = 15f
+                setPadding(dp(16), dp(10), dp(16), dp(10))
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    cornerRadius = dp(18).toFloat()
+                    setColor(0xF2262626.toInt())
+                }
+                maxWidth = dp(280)
+                setLineSpacing(0f, 1.15f)
+            }
+            val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+            } else {
+                @Suppress("DEPRECATION")
+                WindowManager.LayoutParams.TYPE_PHONE
+            }
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                type,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                    or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                    or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT,
+            ).apply {
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                y = dp(96)
+            }
+            try {
+                windowManager.addView(bubble, params)
+                bubbleView = bubble
+                mainHandler.postDelayed({ dismissBubble(windowManager) }, BUBBLE_MS)
+            } catch (_: Throwable) {
+                bubbleView = null
+            }
+        }
+    }
+
+    private fun dismissBubble(windowManager: WindowManager? = null) {
+        val owner = serviceInstance ?: this
+        mainHandler.post {
+            val view = bubbleView ?: return@post
+            bubbleView = null
+            try {
+                val wm = windowManager
+                    ?: (owner.context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)
+                wm?.removeView(view)
+            } catch (_: Throwable) {
+                // 忽略
+            }
         }
     }
 

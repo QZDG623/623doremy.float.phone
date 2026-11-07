@@ -217,6 +217,8 @@ export type PerceptionConfig = {
   overuseLockApps: string[];
   /** 锁定/拉回遮罩上的那句话。 */
   overuseMessage: string;
+  /** 选「再刷一会儿」后，角色在悬浮气泡里说的那句话。 */
+  overuseSnoozeMessage: string;
 };
 
 export const PERCEPTION_DEFAULTS: PerceptionConfig = {
@@ -253,6 +255,7 @@ export const PERCEPTION_DEFAULTS: PerceptionConfig = {
   overuseApps: [],
   overuseLockApps: [],
   overuseMessage: "这个应用用太久了，先回小手机歇一会儿吧。",
+  overuseSnoozeMessage: "好嘛，那就再刷一会儿，记得早点回来。",
 };
 
 export const PERCEPTION_LIMITS = {

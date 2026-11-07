@@ -96,7 +96,10 @@ export function readGrantStatus(): { brightness: boolean; dnd: boolean; usageSta
  * 与其报「参数错误」让它重试，不如尽量理解意图——但**范围一定要夹紧**
  * （亮度 1-100、音量 0-100），不能把奇怪的值直接透传给原生。
  */
-export function runDeviceAction(args: Record<string, unknown>): DeviceActionOutcome {
+export function runDeviceAction(
+  args: Record<string, unknown>,
+  options?: { actorName?: string },
+): DeviceActionOutcome {
   const config = loadDeviceActionConfig();
   if (!config.enabled) {
     return { ok: false, reason: "TA 还没有开启设备操作功能（设置 → 操作设备）" };
@@ -239,7 +242,7 @@ export function runDeviceAction(args: Record<string, unknown>): DeviceActionOutc
       return logDeviceAction({ ok: true, action: "openApp", message: `已打开「${shown}」` }, "openApp");
     }
 
-    // ── 闹钟：带系统界面，用户自己确认时间 ──
+    // ── 闹钟：角色直接设，不再让用户确认时间 ──
     case "alarm": {
       const blocked = allowed("alarm");
       if (blocked) return blocked;
@@ -251,8 +254,13 @@ export function runDeviceAction(args: Record<string, unknown>): DeviceActionOutc
       if (!Number.isInteger(minute) || minute < 0 || minute > 59) {
         return { ok: false, reason: "minute 需要在 0-59 之间" };
       }
+      // 备注带上角色身份：早上看到闹钟就知道是谁设的，不会「不知道谁设的」。
       const note = String(args.message ?? "").trim();
-      const result = setAlarm(hour, minute, note);
+      const actor = options?.actorName?.trim();
+      const label = actor
+        ? `${actor}定的闹钟${note ? `（${note}）` : ""}`
+        : note;
+      const result = setAlarm(hour, minute, label);
       if (!result.ok) {
         // needPermission=set_alarm 是「壳没声明时钟要求的调用方权限」——
         // 这种情况只能更新壳，**系统设置里没有对应开关**，所以措辞必须和
@@ -263,8 +271,7 @@ export function runDeviceAction(args: Record<string, unknown>): DeviceActionOutc
         return { ok: false, reason: result.reason };
       }
       const hhmm = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
-      // needsConfirm 时系统界面已弹出，结果以用户确认为准，措辞不能说得太满
-      return logDeviceAction({ ok: true, action: "alarm", message: `闹钟 ${hhmm} 已交给系统时钟（请在时钟里确认）` }, "alarm");
+      return logDeviceAction({ ok: true, action: "alarm", message: `闹钟 ${hhmm} 已经设好了${actor ? `，备注是「${label}」` : ""}` }, "alarm");
     }
 
     case "timer": {

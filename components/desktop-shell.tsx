@@ -2721,6 +2721,13 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
       // 只清 hash，保留 query（可能有来电的 ring 参数在同一路径上）
       window.history.replaceState(null, "", url.pathname + url.search);
       const sessionId = decodeURIComponent(match[1]);
+      if (sessionId === "last") {
+        // 守卫「回小手机」不知道具体会话，交给网页挑最近聊过的那个。
+        const latest = [...loadChatSessions()]
+          .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))[0];
+        if (latest) openChatSessionFromNotice(latest.id);
+        return;
+      }
       if (sessionId) openChatSessionFromNotice(sessionId);
     };
     const bootTimer = window.setTimeout(consumeOpenChatHash, 1200);
