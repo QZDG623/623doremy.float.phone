@@ -106,6 +106,10 @@ class AppGuard(private val context: Context) {
         @Volatile
         private var bubbleView: View? = null
 
+        /** 触发当前「用太久」遮罩的应用；切到别的应用时遮罩跟着收起。 */
+        @Volatile
+        private var overlayPkg = ""
+
         /** 「用太久」定时检查是否已在跑，防止重复投递。 */
         @Volatile
         private var watchdogRunning = false
@@ -188,6 +192,12 @@ class AppGuard(private val context: Context) {
         // 离开了被锁的应用（去了别的 App）：锁不再适用于新应用
         if (lockedPkg.isNotBlank() && lockedPkg != pkg) {
             lockedPkg = ""
+            postDismiss()
+        }
+
+        // 「用太久」的遮罩只属于触发它的应用：切走了就收起，
+        // 否则它会跟着用户跑到微信、相册里去挡住无关的界面。
+        if (overlayKind.startsWith("overuse") && overlayPkg.isNotBlank() && overlayPkg != pkg) {
             postDismiss()
         }
 
@@ -330,6 +340,7 @@ class AppGuard(private val context: Context) {
         )
 
         val message = root.optString("overuseMessage", "这个应用用太久了，先回小手机歇一会儿吧。")
+        overlayPkg = pkg
 
         if (lockMode) {
             lockedPkg = pkg
@@ -557,6 +568,7 @@ class AppGuard(private val context: Context) {
         val view = overlayView ?: return
         overlayView = null
         overlayKind = ""
+        overlayPkg = ""
         overlayShownAt = 0L
         try {
             val windowManager = owner.context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
