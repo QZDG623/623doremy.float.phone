@@ -71,7 +71,7 @@ import { prepareShortTermContext } from "./short-term-assembler";
 import { parseActionTags, dispatchActions } from "./action-parser";
 import { findEnabledToolForSchema, getEnabledTools, type EnabledTool } from "./tool-storage";
 import { formatToolsForPrompt, formatToolSchema } from "./tool-prompt";
-import { parseToolCalls, parseToolFetches, executeToolCalls, formatToolResults } from "./tool-executor";
+import { parseToolCalls, parseToolFetches, executeToolCalls, formatToolResults, inferDeviceActionCall } from "./tool-executor";
 import type { ToolCall, ToolResult } from "./tool-executor";
 import { getStickerPromptNames, getStickerPromptExample, isKnownStickerLabel } from "./sticker-data";
 import { formatCustomAppChatDirectivesForPrompt } from "./custom-app-chat-directives";
@@ -2433,7 +2433,23 @@ async function generateNativeChatCompletion(
         }
         const assistantForToolContext = stripStateAndInnerForPrompt(displayContent);
 
-        if (result.toolCalls.length === 0) {
+        // 兜底：有些模型没走原生工具调用，而是把设备动作参数原样写进正文
+        // （如 action: torch / on: true）。这不是台词，识别后当成一次真实调用执行。
+        let effectiveToolCalls = result.toolCalls;
+        let assistantContentForDisplay = afterActionStrip;
+        if (effectiveToolCalls.length === 0) {
+            const inferred = inferDeviceActionCall(afterActionStrip);
+            if (inferred) {
+                effectiveToolCalls = [{
+                    id: `inferred-${Date.now()}`,
+                    name: inferred.name,
+                    args: inferred.args,
+                }];
+                assistantContentForDisplay = "";
+            }
+        }
+
+        if (effectiveToolCalls.length === 0) {
             throwIfAborted(options?.signal);
             // 无工具调用的最终轮：把解析到的思维链先交给回调（先于 onTextPart，与非原生路径一致）
             // 标签解析开启时已在上方用标签思维链覆盖，此处不再重复喂原生
@@ -2446,20 +2462,20 @@ async function generateNativeChatCompletion(
 
         throwIfAborted(options?.signal);
         await callbacks?.onNativeToolAssistantTurn?.({
-            content: afterActionStrip,
+            content: assistantContentForDisplay,
             rawContent: displayContent,
             reasoning: onlineThinkingEnabled ? (extractThinkingTag(result.content, onlineThinkingTag) || undefined) : result.reasoning,
             openRouterReasoningDetails: onlineThinkingEnabled ? undefined : result.openRouterReasoningDetails,
-            toolCalls: result.toolCalls,
+            toolCalls: effectiveToolCalls,
         });
-        if (afterActionStrip) {
-            parts.push({ text: afterActionStrip });
+        if (assistantContentForDisplay) {
+            parts.push({ text: assistantContentForDisplay });
         }
 
-        const loaderCalls = result.toolCalls
+        const loaderCalls = effectiveToolCalls
             .map(call => ({ call, loader: nativeBundle.loaderMap.get(call.name) }))
             .filter((item): item is { call: LlmToolCall; loader: { sourceKey: string; label: string } } => Boolean(item.loader));
-        const realNativeCalls = result.toolCalls.filter(call => !nativeBundle.loaderMap.has(call.name));
+        const realNativeCalls = effectiveToolCalls.filter(call => !nativeBundle.loaderMap.has(call.name));
         const textCalls = realNativeCalls.map((call) => nativeChatToolCallToTextCall(call, nativeBundle));
         const displayedActionNames = [
             ...loaderCalls.map(item => `展开「${item.loader.label}」动作说明`),
@@ -2471,8 +2487,8 @@ async function generateNativeChatCompletion(
         let realResults: Awaited<ReturnType<typeof executeToolCalls>> = [];
         try {
             if (textCalls.length > 0) {
-                const onlyNativeCall = result.toolCalls.length === 1 && textCalls.length === 1
-                    ? result.toolCalls[0]
+                const onlyNativeCall = effectiveToolCalls.length === 1 && textCalls.length === 1
+                    ? effectiveToolCalls[0]
                     : undefined;
                 realResults = await executeToolCalls(textCalls, {
                     appId: options?.appId ?? "chat",
@@ -2493,7 +2509,7 @@ async function generateNativeChatCompletion(
                                 content: assistantForToolContext,
                                 reasoning: result.reasoning,
                                 openRouterReasoningDetails: result.openRouterReasoningDetails,
-                                toolCalls: result.toolCalls,
+                                toolCalls: effectiveToolCalls,
                             },
                             {
                                 role: "tool",
@@ -2539,7 +2555,7 @@ async function generateNativeChatCompletion(
         let realResultIndex = 0;
         let expandedChanged = false;
 
-        for (const nativeCall of result.toolCalls) {
+        for (const nativeCall of effectiveToolCalls) {
             const loader = nativeBundle.loaderMap.get(nativeCall.name);
             if (loader) {
                 expandedSourceIds = touchNativeExpandedToolSource(expandedSourceIds, loader.sourceKey);
@@ -2597,7 +2613,7 @@ async function generateNativeChatCompletion(
             content: assistantForToolContext,
             reasoning: result.reasoning,
             openRouterReasoningDetails: result.openRouterReasoningDetails,
-            toolCalls: result.toolCalls,
+            toolCalls: effectiveToolCalls,
         });
         const toolExecutionId = createToolExecutionId();
         for (const outcome of outcomes) {

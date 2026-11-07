@@ -64,10 +64,26 @@ export function formatGroupToolsForPrompt(tools: EnabledTool[]): string {
 }
 
 /**
+ * 追加在「获取指令」结果末尾的硬性要求。
+ *
+ * 部分模型会把参数说明当成台词复述（例如直接输出 `action: torch` / `on: true`），
+ * 导致动作永远不执行。这里用最短、最明确的措辞要求「下一行只输出动作指令」。
+ */
+const STRICT_EXECUTION_DIRECTIVE = [
+    "",
+    "——",
+    "立刻执行：下面这一行只输出动作指令，不要复述上面的参数说明，不要用 YAML、项目符号或多行列表。",
+    '格式：["角色名"执行动作:具体动作名({"参数名":值})]',
+    "同一轮里不要只输出参数键值对，否则动作不会被执行。",
+].join("\n");
+
+/**
  * Format a single action's parameter schema for the "获取指令" response.
  */
 export function formatToolSchema(tool: EnabledTool, context?: ToolSchemaFormatContext): string {
-    if (tool.usageGuide) return expandToolMacros(tool.usageGuide, context);
+    if (tool.usageGuide) {
+        return expandToolMacros(tool.usageGuide, context) + "\n" + STRICT_EXECUTION_DIRECTIVE;
+    }
 
     if (tool.source === "rest_package") {
         const lines: string[] = [];

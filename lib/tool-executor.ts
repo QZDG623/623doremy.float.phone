@@ -462,7 +462,49 @@ export function parseToolCalls(text: string): { cleanText: string; toolCalls: To
     }
     cleanText += text.slice(cursor);
     cleanText = cleanText.replace(/\n{3,}/g, "\n\n").trim();
+
+    // 有些模型不会按 [执行动作:...] 调用，而是把参数原样吐成文本，例如：
+    //   action: torch
+    //   on: true
+    // 或  - action: brightness / - level: 50
+    // 这类整段都是 key: value 的内容不应当成台词发给用户，能认出是设备动作就直接执行。
+    if (toolCalls.length === 0) {
+        const inferred = inferDeviceActionCall(cleanText);
+        if (inferred) {
+            return { cleanText: "", toolCalls: [inferred] };
+        }
+    }
     return { cleanText, toolCalls };
+}
+
+const DEVICE_ACTION_VALUES = new Set([
+    "torch", "volume", "brightness", "dnd", "openApp",
+    "alarm", "timer", "media", "openUrl",
+]);
+
+/**
+ * 将「整段都是 key: value」的文本识别为一次操作手机设备的调用。
+ * 只认 action 落在设备动作枚举里的内容，避免把普通对话误当指令。
+ */
+export function inferDeviceActionCall(text: string): ToolCall | null {
+    if (!text) return null;
+    const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    if (lines.length < 2 || lines.length > 8) return null;
+    const args: Record<string, unknown> = {};
+    for (const line of lines) {
+        const match = line.match(/^[-*]?\s*([A-Za-z][A-Za-z0-9_]*)\s*[:：]\s*(.+)$/);
+        if (!match) return null;
+        const raw = match[2].replace(/^["'`]|["'`]$/g, "").trim();
+        if (raw === "true") args[match[1]] = true;
+        else if (raw === "false") args[match[1]] = false;
+        else if (/^-?\d+(\.\d+)?$/.test(raw)) args[match[1]] = Number(raw);
+        else args[match[1]] = raw;
+    }
+    if (!DEVICE_ACTION_VALUES.has(String(args.action ?? ""))) return null;
+    if (!isInternalCapabilityAvailable(DEVICE_ACTION_CAPABILITY_ID)) return null;
+    const capability = getInternalCapability(DEVICE_ACTION_CAPABILITY_ID);
+    if (!capability) return null;
+    return { name: capability.name, args };
 }
 
 // ── Execute tool calls (unified entry) ────────

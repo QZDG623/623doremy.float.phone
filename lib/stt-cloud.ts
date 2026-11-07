@@ -343,7 +343,9 @@ export async function startContinuousVoice(
 
     const stream = await openMic();
 
-    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    const AudioCtx = window.AudioContext
+        || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+        || AudioContext;
     const audioCtx: AudioContext = new AudioCtx();
     // 关键：安卓 WebView 里新建的 AudioContext 常是 suspended，AnalyserNode 会一直
     // 返回静音波形（全 128）→ RMS 恒为 0 → VAD 永远不触发、一句话也录不到。

@@ -730,7 +730,11 @@ export function setCallAudioSessionActive(active: boolean): void {
 
 function getAudioContext(): AudioContext | null {
     if (typeof window === "undefined") return null;
-    const Ctor = (window as any).AudioContext || (window as any).webkitAudioContext;
+    const nativeWindow = window as unknown as {
+        AudioContext?: typeof AudioContext;
+        webkitAudioContext?: typeof AudioContext;
+    };
+    const Ctor = nativeWindow.AudioContext || nativeWindow.webkitAudioContext;
     if (!Ctor) return null;
     if (!_audioCtx) {
         // 不要钉 sampleRate:部分 iOS 版本上非硬件采样率的 ctx 会"时钟照走、
