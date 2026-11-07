@@ -11,6 +11,7 @@ import { copyTextToClipboard } from "@/lib/clipboard-utils";
 import { LifeDiagnosticsPanel } from "@/components/life/life-diagnostics-panel";
 import { ScreenshotDiagnosticsPanel } from "@/components/screenshot/diagnostics-panel";
 import { ModuleDiagnostics } from "@/components/settings/module-diagnostics";
+import { WEB_BUILD_VERSION } from "@/lib/app-version";
 
 type CheckStatus = "ok" | "warn" | "fail" | "info";
 type CheckItem = { id: string; title: string; status: CheckStatus; detail: string; fix?: string };
@@ -75,6 +76,14 @@ export function RuntimeDiagnostics({ onNotice }: { onNotice?: (message: string) 
     const shell = typeof window !== "undefined" ? window.AndroidShell : undefined;
     const isShell = Boolean(shell && typeof shell.getVersion === "function");
     result.push({ id: "runtime", title: "运行容器", status: isShell ? "ok" : "info", detail: isShell ? "检测到 Android 原生壳。" : "没有检测到 AndroidShell；可能是浏览器、PWA 或旧版 APK。", fix: !isShell ? "如果正在 APK 内使用，请确认安装的是包含原生桥接的版本。" : undefined });
+    // 网页版本必须能在界面上核对：设备可能一直在跑旧缓存，光看功能是否生效
+    // 无法区分「新代码有 bug」和「根本没加载新代码」。
+    result.push({
+      id: "web-version",
+      title: "网页构建版本",
+      status: "ok",
+      detail: `当前加载的网页版本：${WEB_BUILD_VERSION}。如果低于仓库最新版本，说明设备还在跑旧缓存，需要重新打开或刷新。`,
+    });
 
     if (isShell) {
       const version = safeRead(() => String(shell!.getVersion!()), "读取失败");

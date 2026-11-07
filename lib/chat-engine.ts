@@ -71,7 +71,7 @@ import { prepareShortTermContext } from "./short-term-assembler";
 import { parseActionTags, dispatchActions } from "./action-parser";
 import { findEnabledToolForSchema, getEnabledTools, type EnabledTool } from "./tool-storage";
 import { formatToolsForPrompt, formatToolSchema } from "./tool-prompt";
-import { parseToolCalls, parseToolFetches, executeToolCalls, formatToolResults, inferDeviceActionCall } from "./tool-executor";
+import { parseToolCalls, parseToolFetches, executeToolCalls, formatToolResults, inferDeviceActionCall, stripDeviceProtocolLines } from "./tool-executor";
 import type { ToolCall, ToolResult } from "./tool-executor";
 import { getStickerPromptNames, getStickerPromptExample, isKnownStickerLabel } from "./sticker-data";
 import { formatCustomAppChatDirectivesForPrompt } from "./custom-app-chat-directives";
@@ -2902,14 +2902,19 @@ async function generateChatCompletionCore(
         const { toolCalls } = toolsEnabled ? parseToolCalls(afterActionStrip) : { toolCalls: [] };
         // Tool directives are protocol, never user-facing prose. Strip valid directives
         // (they are persisted separately below) and discard malformed directive lines.
-        const visibleText = stripMalformedTextToolDirectives(stripTextToolDirectives(afterActionStrip));
+        // 工具指令是协议，绝不能当台词显示。除了标准的 [执行动作:...]，
+        // 还要挡掉模型直接吐出来的 YAML 参数行（action: torch / on: true），
+        // 否则它会一条条变成气泡。
+        const visibleText = stripDeviceProtocolLines(stripMalformedTextToolDirectives(stripTextToolDirectives(afterActionStrip)));
         const assistantForToolContext = stripStateAndInnerForPrompt(filteredOutput);
 
         // No tool activity — final round
         if (toolFetches.length === 0 && toolCalls.length === 0) {
             throwIfAborted(options?.signal);
-            await callbacks?.onTextPart?.(visibleText);
-            parts.push({ text: visibleText });
+            if (visibleText.trim()) {
+                await callbacks?.onTextPart?.(visibleText);
+                parts.push({ text: visibleText });
+            }
             if (bailoutRef.shortcutHandles.length > 0) bailoutRef.shortcutCompleted = true;
             break;
         }

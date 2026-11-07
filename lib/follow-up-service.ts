@@ -37,6 +37,7 @@ import { parseAIResponse } from "./rich-message-parser";
 import type { ParsedMessagePart } from "./rich-message-parser";
 import { getStatusRegionConfig, isCustomStatusRegionActive } from "./chat-status-region";
 import { isKnownStickerLabel } from "./sticker-data";
+import { executeToolCalls, parseToolCalls, stripDeviceProtocolLines } from "./tool-executor";
 import { loadCharacters } from "./character-storage";
 import { loadVirtualLifeState, saveVirtualLifeState } from "./life/life-storage";
 import { getActorClock, getCurrentActorSchedule, resolveActorLifeNow, settleActorTimelineToNow } from "./life/life-runtime";
@@ -1158,6 +1159,22 @@ export async function parseAndSaveResponse(
     const sess = sessions.find(s => s.id === sessionId);
     const previousState = sess && !sess.isGroup ? getLatestCharacterStateValues(resolveSessionCharacterId(sess) || "") : [];
 
+    // 后台追问/主动消息/离线回传不经过聊天引擎的工具循环：模型把设备动作写成
+    // YAML（action: torch / on: true）时，以前会原样变成一条条气泡发给用户。
+    // 这里补一遍解析——能执行就执行，执行不了的协议行也从正文里剔掉。
+    try {
+        const { toolCalls: deviceActionCalls } = parseToolCalls(rawText);
+        if (deviceActionCalls.length > 0) {
+            void executeToolCalls(deviceActionCalls, {
+                appId: sess?.isGroup ? "group_chat" : "chat",
+                sessionId,
+                characterId: sess ? (resolveSessionCharacterId(sess) ?? undefined) : undefined,
+            }).catch(err => console.warn("[FollowUp] 设备动作执行失败:", err));
+        }
+    } catch (err) {
+        console.warn("[FollowUp] 设备动作解析失败:", err);
+    }
+
     const { parts, stateValues, freshStateValues, statusPanel, innerMonologue } = parseAIResponse(rawText, previousState);
 
     // 自定义状态栏渲染戳：追发/屏幕速聊/离线回传落库的消息此前从不盖
@@ -1191,6 +1208,8 @@ export async function parseAndSaveResponse(
 
     const filteredParts: ParsedMessagePart[] = [];
     for (const p of parts) {
+        // 纯设备协议行（action: torch / on: true）不是台词，整条丢弃。
+        if (p.content && !stripDeviceProtocolLines(p.content).trim()) continue;
         if (p.mediaType === "voice_call") { triggerCall = "voice"; continue; }
         if (p.mediaType === "video_call") { triggerCall = "video"; continue; }
         // 无效/已删除的表情包默认丢弃，避免以 `[表情包名]` 文字形式发出；

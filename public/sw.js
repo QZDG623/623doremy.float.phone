@@ -42,7 +42,9 @@
 // v37：表情包只保留能真实加载的；已删除/无图表情从历史与输出中剔除，不再显示文字；
 //      微信语音合成去掉 enableTTS 强校验、失败不再发绿色模板卡；时间戳统一带年月日并注入离开时长。
 // v43：设备指令兜底（纯文本参数也执行）、获取指令后强制输出动作。
-const CACHE_VERSION = "ai-phone-pwa-v43";
+// v44：后台追问/主动消息也解析设备动作（以前 action: torch 会一条条变成气泡）；
+//      支持模型逐行发参数的拼装；设置→运行诊断 可核对网页构建版本。
+const CACHE_VERSION = "ai-phone-pwa-v44";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 

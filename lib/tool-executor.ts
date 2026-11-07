@@ -474,22 +474,49 @@ export function parseToolCalls(text: string): { cleanText: string; toolCalls: To
             return { cleanText: "", toolCalls: [inferred] };
         }
     }
-    return { cleanText, toolCalls };
+    return { cleanText: stripDeviceProtocolLines(cleanText), toolCalls };
 }
 
-const DEVICE_ACTION_VALUES = new Set([
-    "torch", "volume", "brightness", "dnd", "openApp",
-    "alarm", "timer", "media", "openUrl",
-]);
+import {
+    DEVICE_ACTION_VALUES,
+    stripDeviceProtocolLines,
+} from "./device-protocol-text";
+
+export { stripDeviceProtocolLines };
+
+/** 缺了这些参数就没法真正执行，先攒着等模型下一行补上。 */
+const REQUIRED_DEVICE_ARGS: Record<string, string[]> = {
+    brightness: ["level"],
+    alarm: ["hour", "minute"],
+    openApp: ["app"],
+    openUrl: ["url"],
+};
+
+// 模型经常把一次动作拆成好几条消息发（"action: brightness" 一条、"level: 40"
+// 另一条）。跨消息拼参数需要一点记忆，60 秒内有效，避免误接到很久以前的动作上。
+let pendingDeviceAction: { args: Record<string, unknown>; at: number } | null = null;
+const PENDING_DEVICE_ACTION_MS = 60_000;
+
+function deviceActionHasRequiredArgs(args: Record<string, unknown>): boolean {
+    const action = String(args.action ?? "");
+    if (action === "timer") return args.minutes !== undefined || args.seconds !== undefined;
+    if (action === "volume") {
+        return args.level !== undefined || ["up", "down"].includes(String(args.mode ?? "up"));
+    }
+    const required = REQUIRED_DEVICE_ARGS[action];
+    if (!required) return true;
+    return required.every(key => args[key] !== undefined);
+}
 
 /**
  * 将「整段都是 key: value」的文本识别为一次操作手机设备的调用。
  * 只认 action 落在设备动作枚举里的内容，避免把普通对话误当指令。
+ * 兼容模型逐行发消息的情况：参数不足时先记住，等后续参数行补齐再执行。
  */
 export function inferDeviceActionCall(text: string): ToolCall | null {
     if (!text) return null;
     const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-    if (lines.length < 2 || lines.length > 8) return null;
+    if (lines.length < 1 || lines.length > 8) return null;
     const args: Record<string, unknown> = {};
     for (const line of lines) {
         const match = line.match(/^[-*]?\s*([A-Za-z][A-Za-z0-9_]*)\s*[:：]\s*(.+)$/);
@@ -500,11 +527,32 @@ export function inferDeviceActionCall(text: string): ToolCall | null {
         else if (/^-?\d+(\.\d+)?$/.test(raw)) args[match[1]] = Number(raw);
         else args[match[1]] = raw;
     }
-    if (!DEVICE_ACTION_VALUES.has(String(args.action ?? ""))) return null;
+
+    if (pendingDeviceAction && Date.now() - pendingDeviceAction.at > PENDING_DEVICE_ACTION_MS) {
+        pendingDeviceAction = null;
+    }
+
+    let mergedArgs = args;
+    const action = String(args.action ?? "");
+    if (!action) {
+        if (!pendingDeviceAction) return null;
+        mergedArgs = { ...pendingDeviceAction.args, ...args };
+    } else if (pendingDeviceAction && pendingDeviceAction.args.action === action) {
+        mergedArgs = { ...pendingDeviceAction.args, ...args };
+    }
+
+    const resolvedAction = String(mergedArgs.action ?? "");
+    if (!DEVICE_ACTION_VALUES.has(resolvedAction)) return null;
     if (!isInternalCapabilityAvailable(DEVICE_ACTION_CAPABILITY_ID)) return null;
     const capability = getInternalCapability(DEVICE_ACTION_CAPABILITY_ID);
     if (!capability) return null;
-    return { name: capability.name, args };
+
+    if (!deviceActionHasRequiredArgs(mergedArgs)) {
+        pendingDeviceAction = { args: mergedArgs, at: Date.now() };
+        return null;
+    }
+    pendingDeviceAction = null;
+    return { name: capability.name, args: mergedArgs };
 }
 
 // ── Execute tool calls (unified entry) ────────

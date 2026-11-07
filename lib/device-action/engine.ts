@@ -162,7 +162,9 @@ export function runDeviceAction(
       const blocked = allowed("torch");
       if (blocked) return blocked;
       if (caps.torch !== true) return { ok: false, reason: "这台设备没有可用的闪光灯" };
-      const on = args.on === true || args.on === "true" || args.on === 1;
+      // 模型经常只写 "action: torch"（比如"帮我开手电筒"），没给 on。
+      // 默认按"打开"处理，比把灯关掉更符合这句话的意图。
+      const on = args.on === undefined ? true : (args.on === true || args.on === "true" || args.on === 1);
       const result = setTorch(on);
       if (!result.ok) return { ok: false, reason: result.reason };
       return logDeviceAction({ ok: true, action: "torch", message: on ? "手电筒已打开" : "手电筒已关闭" }, "torch");
@@ -174,6 +176,10 @@ export function runDeviceAction(
       const stream = String(args.stream ?? "media");
       const mode = String(args.mode ?? "up");
       const level = Number(args.level);
+      // set 却没给 level 时不能当成 0——那会把音量直接静音。
+      if (mode === "set" && !Number.isFinite(level)) {
+        return { ok: false, reason: "缺少 level 参数（音量百分比 0-100）" };
+      }
       const result = setVolume(stream, mode, Number.isFinite(level) ? level : 0);
       if (!result.ok) return { ok: false, reason: result.reason };
       const pct = result.max && result.current !== undefined
