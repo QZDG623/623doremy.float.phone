@@ -344,7 +344,6 @@ class CallControlService : AccessibilityService() {
             for (i in 0 until old.length()) {
                 val item = old.optJSONObject(i) ?: continue
                 if (item.optString("id") != id) next.put(item)
->>>>>>> /tmp/mf/theirs
             }
             prefs.edit().putString(QUEUE_KEY, next.toString()).apply()
         }
