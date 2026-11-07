@@ -299,7 +299,7 @@ const CALENDAR_MANAGEMENT_USAGE_GUIDE = [
     '[执行动作:查看日程({"date":"2026-03-17"})]',
     "",
     "动作：添加日程",
-    "描述：添加一条日程。",
+    "描述：添加一条日程到小手机内的日历（只在 App 里可见）。若用户要写进真实手机日历/系统日历，必须改用「写入系统日历」。",
     "参数：",
     "  - date (string): 日期，YYYY-MM-DD",
     "  - startTime (string): 开始时间，HH:MM，范围 08:00-23:00",
@@ -640,7 +640,7 @@ const CALENDAR_MANAGEMENT_SUBTOOLS: InternalToolDefinition[] = [
     },
     {
         name: "添加日程",
-        description: "添加一条日程。",
+        description: "添加一条日程到{{char}}小手机内的日历（只在 App 里可见，不会出现在真实手机的系统日历里）。要写进真实手机日历请用「写入系统日历」。",
         parameterSchema: CALENDAR_ADD_PARAMETER_SCHEMA,
     },
     {
@@ -1724,7 +1724,7 @@ const CALENDAR_READ_TOOL: InternalToolDefinition = {
 
 const CALENDAR_WRITE_TOOL: InternalToolDefinition = {
     name: "写入系统日历",
-    description: "把一个重要的日子写进{{user}}手机的系统日历，到点系统会提醒 TA。",
+    description: "写入{{user}}真实手机的系统日历（华为/小米/苹果自带的日历 App 能看到，到点系统会提醒 TA）。这是「写进真实日历」的唯一方式，不是小手机内的日历。",
     parameterSchema: CALENDAR_WRITE_PARAMETER_SCHEMA,
 };
 
@@ -1815,7 +1815,7 @@ const DEVICE_ACTION_PARAMETER_SCHEMA = JSON.stringify({
         },
         message: {
             type: "string",
-            description: "action=alarm/timer 时用：闹钟或倒计时的备注（会显示在时钟里）。",
+            description: "action=alarm/timer 时用：闹钟/倒计时在系统时钟里显示的名字。action=alarm 时用你自己的口吻写一句（例如「小懒虫，起床啦」），不要写成「某某定的闹钟」。",
         },
 
     },
@@ -1836,7 +1836,7 @@ const DEVICE_ACTION_USAGE_GUIDE = [
     "",
     "【闹钟 / 倒计时 / 音乐 / 网页的用法】",
     "- timer 最常用：想提醒 TA 休息、吃饭、别熬夜，用 minutes 设一个倒计时即可，不会打扰别人。",
-    "- alarm 由你直接设定，不需要 TA 确认时间；设好后就说「闹钟我设好啦，明天七点叫你」，备注会自动带上你的名字。",
+    "- alarm 由你直接设定，不需要 TA 确认时间；闹钟名称也由你自己起——用你的口吻写一句（比如「别赖床，我在楼下等你」），不要写「某某定的闹钟」。",
     "- media 控制的是「当前正在播放的音乐」，可能不是你说的那首；控制完别断言现在放的是什么。",
     "- media 的结果里若 confirmed 为 false，说明指令只是发出去了、没能确认是否生效（多半是 TA 还没授予「通知使用权」）。这时如实说「我把播放指令发出去了」，不要断言「已经放上了」。",
     "- openUrl 会把 TA 带离小手机去看网页，只在确实要分享内容时用。",

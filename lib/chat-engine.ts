@@ -1937,8 +1937,12 @@ export async function buildChatPromptMessages(
     const toolsAllowed = options?.toolsAllowed !== false && !isOfflineMode;
     const enabledTools = toolsAllowed ? getEnabledTools(resolvedAppId) : [];
     const hasLifeTools = enabledTools.some(tool => tool.source === "life");
+    // 内置能力（操作设备 / 系统日历 / 查看手机）是用户在设置里显式打开的全局开关，
+    // 不该再受角色人设里有没有 {{tools}} 宏控制——否则换一个角色就「看不见、摸不着」，
+    // 表现为「只有某个角色能设闹钟/写日历」。
+    const hasInternalTools = enabledTools.some(tool => tool.source === "internal");
     const toolsEnabled = enabledTools.length > 0
-        && (options?.forceEnableTools === true || hasLifeTools || presetIncludesToolsMacro(preset, resolvedAppId, effectiveAppTags));
+        && (options?.forceEnableTools === true || hasLifeTools || hasInternalTools || presetIncludesToolsMacro(preset, resolvedAppId, effectiveAppTags));
     const usesNativeActions = Boolean(toolsEnabled && nativeToolProtocolForConfig(config));
     // 多图必须在 prepareShortTermContext 之前展开：后者的 unifiedRecentItems 下标
     // 指向传入的 history 数组；先展开才能保证下标和最终 promptHistory 一致。

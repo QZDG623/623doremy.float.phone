@@ -254,12 +254,11 @@ export function runDeviceAction(
       if (!Number.isInteger(minute) || minute < 0 || minute > 59) {
         return { ok: false, reason: "minute 需要在 0-59 之间" };
       }
-      // 备注带上角色身份：早上看到闹钟就知道是谁设的，不会「不知道谁设的」。
+      // 闹钟名称由角色自己起：模型会在 message 里写一句它自己口吻的话。
+      // 只有模型没给时才退回一个中性的兜底，绝不强行拼「某某定的闹钟」。
       const note = String(args.message ?? "").trim();
       const actor = options?.actorName?.trim();
-      const label = actor
-        ? `${actor}定的闹钟${note ? `（${note}）` : ""}`
-        : note;
+      const label = note || (actor ? `${actor}叫你的闹钟` : "");
       const result = setAlarm(hour, minute, label);
       if (!result.ok) {
         // needPermission=set_alarm 是「壳没声明时钟要求的调用方权限」——
@@ -271,7 +270,7 @@ export function runDeviceAction(
         return { ok: false, reason: result.reason };
       }
       const hhmm = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
-      return logDeviceAction({ ok: true, action: "alarm", message: `闹钟 ${hhmm} 已经设好了${actor ? `，备注是「${label}」` : ""}` }, "alarm");
+      return logDeviceAction({ ok: true, action: "alarm", message: `闹钟 ${hhmm} 已经设好了${label ? `，时钟里的名字是「${label}」` : ""}` }, "alarm");
     }
 
     case "timer": {
