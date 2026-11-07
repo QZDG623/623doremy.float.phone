@@ -1,10 +1,21 @@
 "use client";
 
 import { Info, ShieldAlert, Heart } from "lucide-react";
+import { WEB_BUILD_VERSION } from "@/lib/app-version";
 
 export function AboutDeclaration() {
+    // 同时显示网页版本和实际站点地址：设备一直跑旧缓存时，用户能一眼看出
+    // 自己加载的到底是不是仓库最新构建，也方便排查「装的是哪个部署」。
+    const origin = typeof window === "undefined" ? "" : window.location.origin;
     return (
         <div className="flex flex-col gap-5 h-full">
+            <div className="g-card" style={{ padding: "10px 14px" }}>
+                <div className="flex flex-col gap-1">
+                    <span className="menu-desc ts-12 !mt-0">网页版本：{WEB_BUILD_VERSION}</span>
+                    {origin ? <span className="menu-desc ts-12 !mt-0" style={{ wordBreak: "break-all" }}>加载站点：{origin}</span> : null}
+                    <span className="menu-desc ts-12 !mt-0">看不到最新版本号时，说明设备还在跑旧缓存。</span>
+                </div>
+            </div>
             <p className="card-section-label m-0 mx-2">免责声明</p>
 
             <div className="g-card">
