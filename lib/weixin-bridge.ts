@@ -10,7 +10,9 @@ import { loadMediaBlob, isMediaStoreRef } from "./media-cache-storage";
 import { parseAIResponse, type ParsedMessagePart } from "./rich-message-parser";
 import { getStatusRegionConfig, isCustomStatusRegionActive } from "./chat-status-region";
 import { splitBilingualText } from "./bilingual-text";
-import { resolveVoiceConfig, synthesizeSpeech } from "./tts-service";
+import { resolveVoiceConfigCandidates, synthesizeSpeech } from "./tts-service";
+import { findCustomStickerByName, resolveCustomStickerUrl } from "./custom-sticker-storage";
+import { findStickerByName } from "./sticker-data";
 import { formatShoppingPaymentRequestHistory } from "./shopping-payment-request";
 
 // ── iLink 实际消息格式 ────────────────────────────────────────
@@ -66,6 +68,12 @@ function getVoiceSpeechText(transcript: string): string {
     return transcript
         .split(/\n+/)
         .map(line => splitBilingualText(line)?.original || line)
+        .map(line => line
+            .replace(/<\s*#[^>]*#\s*>/g, "")
+            .replace(/[（(]\s*(?:breath|sigh|laugh|laughs|chuckle|sniff|cough|whisper|pause|exhale|inhale)\s*[）)]/gi, "")
+            .replace(/\s{2,}/g, " ")
+            .trim())
+        .filter(Boolean)
         .join("\n")
         .trim();
 }
@@ -639,16 +647,83 @@ function renderXiaohongshuShareCard(part: ParsedMessagePart): string | null {
     return canvas.toDataURL("image/png");
 }
 
-function renderStickerPlaceholder(part: ParsedMessagePart): string | null {
-    const label = getMediaLabel(part) || "表情包";
-    const canvasPack = makeCanvas(120, 120);
+function renderEmojiSticker(emoji: string): string | null {
+    const canvasPack = makeCanvas(160, 160);
     if (!canvasPack) return null;
     const { canvas, ctx } = canvasPack;
-    fillRoundedRect(ctx, 8, 18, 104, 84, 14, "#f7f7f7");
-    ctx.fillStyle = "#2c3440";
-    ctx.font = canvasFont(600, 14);
-    drawCenteredWrappedText(ctx, `[${label}]`, 60, 63, 72, 18, 3);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = `112px ${SANS_FONT}`;
+    ctx.fillText(emoji, 80, 84);
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
     return canvas.toDataURL("image/png");
+}
+
+/** 把远端图片下载成 data URL；iLink 只接受 png/jpeg/webp，其它格式统一转 png。 */
+async function remoteImageToDataUrl(url: string): Promise<string | null> {
+    try {
+        const res = await fetch(url);
+        if (!res.ok) return null;
+        const blob = await res.blob();
+        const mime = (blob.type || res.headers.get("content-type") || "").toLowerCase();
+        if (mime && !mime.startsWith("image/")) return null;
+        if (/^image\/(png|jpe?g|webp)$/i.test(mime)) {
+            const dataUrl = await new Promise<string>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(String(reader.result || ""));
+                reader.onerror = () => reject(reader.error || new Error("read_image_blob_failed"));
+                reader.readAsDataURL(blob);
+            });
+            return /^data:image\/(png|jpe?g|webp);base64,/i.test(dataUrl) ? dataUrl : null;
+        }
+        const bitmap = await createImageBitmap(blob).catch(() => null);
+        if (!bitmap) return null;
+        const canvas = document.createElement("canvas");
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+        canvas.getContext("2d")?.drawImage(bitmap, 0, 0);
+        bitmap.close?.();
+        return canvas.toDataURL("image/png");
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * 解析表情包真正要发出的图片：
+ * 消息自带图 → 角色自定义表情（外链/IndexedDB）→ 内置 emoji 兜底。
+ * 全都拿不到图时返回 null：宁可不发，也不要发一张加载失败的文字占位卡。
+ */
+async function resolveStickerImage(part: ParsedMessagePart, characterId: string): Promise<string | null> {
+    const direct = cleanText(part.mediaData?.stickerUrl);
+    if (direct.startsWith("data:image/")) return direct;
+    if (/^https?:\/\//i.test(direct)) {
+        const remote = await remoteImageToDataUrl(direct);
+        if (remote) return remote;
+    }
+
+    const label = getMediaLabel(part);
+    if (!label) return null;
+
+    const custom = findCustomStickerByName(characterId, label);
+    const externalUrl = cleanText(custom?.externalUrl);
+    if (externalUrl) {
+        if (externalUrl.startsWith("data:image/")) return externalUrl;
+        if (/^https?:\/\//i.test(externalUrl)) {
+            const remote = await remoteImageToDataUrl(externalUrl);
+            if (remote) return remote;
+        }
+    }
+    const assetId = cleanText(custom?.assetId);
+    if (assetId) {
+        const assetUrl = await resolveCustomStickerUrl(assetId);
+        if (assetUrl?.startsWith("data:image/")) return assetUrl;
+    }
+
+    const builtin = findStickerByName(label);
+    if (builtin) return renderEmojiSticker(builtin.emoji);
+    return null;
 }
 
 function renderVoiceMessageCard(transcript: string, duration: number): string | null {
@@ -758,7 +833,6 @@ async function renderMediaCard(part: ParsedMessagePart, charName: string): Promi
         case "music":
         case "music_share": return renderMusicShareCard(part);
         case "xiaohongshu_note_share": return renderXiaohongshuShareCard(part);
-        case "sticker": return renderStickerPlaceholder(part);
         default: return null;
     }
 }
@@ -766,6 +840,10 @@ async function renderMediaCard(part: ParsedMessagePart, charName: string): Promi
 async function partToWeixinOutgoing(part: ParsedMessagePart, charName: string, characterId: string): Promise<WeixinOutgoing | null> {
     const directImage = cleanText(part.mediaData?.stickerUrl);
     if (directImage.startsWith("data:image/")) return { kind: "image", imageDataUrl: directImage };
+    if (part.mediaType === "sticker") {
+        const stickerImage = await resolveStickerImage(part, characterId);
+        return stickerImage ? { kind: "image", imageDataUrl: stickerImage } : null;
+    }
     if (part.mediaType === "audio") {
         const transcript = getVoiceTranscript(part);
         const speechText = getVoiceSpeechText(transcript);
@@ -773,30 +851,30 @@ async function partToWeixinOutgoing(part: ParsedMessagePart, charName: string, c
             ? Math.max(1, Math.ceil(part.mediaData.voiceDuration))
             : estimateVoiceDuration(speechText || transcript);
         const fallbackImageDataUrl = renderVoiceMessageCard(transcript, fallbackDuration);
-        const voiceConfig = resolveVoiceConfig(characterId, "chat");
-        if (voiceConfig?.enableTTS) {
+        // 和小手机语音条一致：绑定方案失败时继续试其它可用方案，避免微信端只剩一张不能播放的占位图。
+        for (const voiceConfig of resolveVoiceConfigCandidates(characterId, "chat")) {
             try {
                 const audioBlob = await synthesizeSpeech(speechText || transcript, voiceConfig);
-                if (audioBlob) {
-                    const [audioDataUrl, audioDuration] = await Promise.all([
-                        blobToAudioDataUrl(audioBlob),
-                        getAudioDuration(audioBlob),
-                    ]);
-                    if (audioDataUrl.startsWith("data:audio/")) {
-                        return {
-                            kind: "voice",
-                            audioDataUrl,
-                            transcript,
-                            duration: audioDuration || fallbackDuration,
-                            fallbackImageDataUrl,
-                        };
-                    }
+                if (!audioBlob) continue;
+                const [audioDataUrl, audioDuration] = await Promise.all([
+                    blobToAudioDataUrl(audioBlob),
+                    getAudioDuration(audioBlob),
+                ]);
+                if (audioDataUrl.startsWith("data:audio/")) {
+                    return {
+                        kind: "voice",
+                        audioDataUrl,
+                        transcript,
+                        duration: audioDuration || fallbackDuration,
+                        fallbackImageDataUrl,
+                    };
                 }
             } catch (err) {
                 console.warn("[WeixinBridge] voice synthesis failed:", err);
             }
         }
-        return fallbackImageDataUrl ? { kind: "image", imageDataUrl: fallbackImageDataUrl } : { kind: "text", text: `语音：${transcript}` };
+        // 合成失败时不再发绿色语音模板卡（微信里只是一张不能播放的图片）。
+        return null;
     }
     const card = await renderMediaCard(part, charName);
     if (card) return { kind: "image", imageDataUrl: card };

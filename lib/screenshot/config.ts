@@ -72,6 +72,22 @@ export type ScreenshotConfig = {
   ballColor: string;
   /** 悬浮球直径（dp），32~96。 */
   ballDiameter: number;
+  /**
+   * 是否允许角色读整屏文字（无障碍遍历）。默认开，但与总开关联动：
+   * 总关闭时读屏也不会发生。读到的文字只用于当轮生成，不落库。
+   */
+  screenTextEnabled: boolean;
+  /**
+   * 自主回复：角色隔一段时间自己看一眼屏幕，然后主动说一句。默认关。
+   * 会消耗模型额度，所以默认关、并受轮数上限约束。
+   */
+  autoCommentEnabled: boolean;
+  /** 自主回复的间隔（秒）。 */
+  autoCommentSeconds: number;
+  /** 本次开启后最多自动回复多少轮；0 = 不限。 */
+  autoCommentMaxRounds: number;
+  /** 是否把回复显示成屏幕上的字幕气泡（关 = 只进聊天，不弹气泡）。 */
+  subtitleEnabled: boolean;
 };
 
 export const SCREENSHOT_DEFAULTS: ScreenshotConfig = {
@@ -86,6 +102,11 @@ export const SCREENSHOT_DEFAULTS: ScreenshotConfig = {
   // 设置页回显与桌面上的球颜色对不上。
   ballColor: "#E65B7CFA",
   ballDiameter: 50,
+  screenTextEnabled: true,
+  autoCommentEnabled: false,
+  autoCommentSeconds: 180,
+  autoCommentMaxRounds: 6,
+  subtitleEnabled: true,
 };
 
 /** 读配置。任何字段缺失都按默认（默认 = 关）处理，绝不因为读失败而放开权限。 */
@@ -115,6 +136,13 @@ export function loadScreenshotConfig(): ScreenshotConfig {
         ? parsed.ballColor
         : SCREENSHOT_DEFAULTS.ballColor,
       ballDiameter: clampNumber(parsed.ballDiameter, 32, 96, SCREENSHOT_DEFAULTS.ballDiameter),
+      // 读屏与字幕：缺省开（仅显式 false 才关），与「反馈默认开」同一取向
+      screenTextEnabled: parsed.screenTextEnabled !== false,
+      // 自主回复会烧额度，缺省必须关
+      autoCommentEnabled: parsed.autoCommentEnabled === true,
+      autoCommentSeconds: clampNumber(parsed.autoCommentSeconds, 30, 1800, SCREENSHOT_DEFAULTS.autoCommentSeconds),
+      autoCommentMaxRounds: clampNumber(parsed.autoCommentMaxRounds, 0, 99, SCREENSHOT_DEFAULTS.autoCommentMaxRounds),
+      subtitleEnabled: parsed.subtitleEnabled !== false,
     };
   } catch {
     return { ...SCREENSHOT_DEFAULTS };

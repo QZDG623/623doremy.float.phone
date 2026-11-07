@@ -342,7 +342,7 @@ async function handleSendVoice(payload: SendVoiceRequest) {
                                 aes_key: encodeMessageAesKey(upload.aeskey),
                                 encrypt_type: 1,
                             },
-                            file_name: "voice.mp3",
+                            file_name: "语音条.mp3",
                             file_size: audio.length,
                             file_ext: "mp3",
                         },

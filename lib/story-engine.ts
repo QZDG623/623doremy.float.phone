@@ -10,7 +10,7 @@ import {
 } from "./settings-storage";
 import type { ApiConfig, PresetConfig, RegexConfig, WorldBookConfig } from "./settings-types";
 import { assemblePromptPayload, type LLMMessage } from "./llm-prompt-assembler";
-import { previewMessagesForApi, sendLLMRequest, ChatEngineError } from "./chat-engine";
+import { previewMessagesForApi, sendLLMRequest, sendLLMStreamRequest, ChatEngineError } from "./chat-engine";
 import { loadMemoryConfig, loadMemoryEntriesByType } from "./memory-storage";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
@@ -52,6 +52,12 @@ export type StoryGenerationOptions = {
     memorySettings?: StoryMemorySettings;
   };
   signal?: AbortSignal;
+  /** 通用流式输出：为真时正文边返回边通过 onStreamDelta 推送；接口不支持时自动回退普通生成。 */
+  stream?: boolean;
+  /** 流式累积文本回调（每次都传当前已输出的完整正文）。 */
+  onStreamDelta?: (text: string) => void;
+  /** 时间感知：每轮注入当前真实时间，并按时间先后理解历史。 */
+  timeAware?: boolean;
 };
 
 function selectStoryPresetPrompts(preset: PresetConfig | null, selectedIds?: string[]): PresetConfig | null {
@@ -85,8 +91,11 @@ function buildStorySettingsPrompt(settings: StoryCharacterSettings | undefined, 
     proseStyle?.prompt?.trim() ? "" : (settings.proseStylePrompt?.trim() || ""),
     settings.extraPrompt?.trim() || "",
     ...(settings.customPromptEntries || []).filter((item) => item.enabled && item.content.trim()).map((item) => `专属条目【${item.name || "未命名"}】：${item.content.trim()}`),
-    status?.prompt?.trim() || "",
-    theater?.prompt?.trim() || "",
+    // 尾部开关只控制后续请求是否要求 AI 生成对应内容；关闭时不注入提示词，并明确禁止输出
+    settings.generateStatusBar !== false ? (status?.prompt?.trim() || "") : "",
+    settings.generateStatusBar === false ? "本轮不要输出 <story_status> 状态栏内容。" : "",
+    settings.generateTheater !== false ? (theater?.prompt?.trim() || "") : "",
+    settings.generateTheater === false ? "本轮不要输出 <story_theater> 小剧场内容。" : "",
   ].filter(Boolean).join("\n");
 }
 
@@ -211,9 +220,13 @@ export async function generateStoryCompletion(
   const preset = selectStoryPresetPrompts(resolvedPreset, options?.settings?.enabledPresetPromptIds);
   const effectiveFoldTags = options?.sessionFoldTags?.trim() || DEFAULT_STORY_FOLD_TAGS;
   const effectiveContextExcludedTags = options?.sessionContextExcludedTags?.trim() || DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS;
+  // 时间感知：历史严格按时间先后排列，避免导入数据或补写消息乱序让模型误判因果
+  const orderedHistory = options?.timeAware !== false
+    ? [...history].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    : history;
   const llmMessages = await buildStoryPromptMessages(
     characterId,
-    history,
+    orderedHistory,
     preset,
     regexes,
     worldBooks,
@@ -222,16 +235,46 @@ export async function generateStoryCompletion(
     options?.floatingChatContext,
     options?.participantIds,
     options?.storyMemory,
+    options?.timeAware !== false,
   );
 
   const userIdentity = resolveUserIdentity(characterId, "story");
   const macroEngine = new MacroEngine(character.name, userIdentity?.name ?? "用户");
 
-  const rawOutput = await sendLLMRequest(apiConfig, preset, llmMessages, regexes, {
-    characterName: character.name,
-  }, { skipOutputRegex: true, includeReasoning: true, appId: "story", appTags: ["story"], signal: options?.signal });
+  const requestMeta = { characterName: character.name };
+  const requestOptions = { skipOutputRegex: true, includeReasoning: true, appId: "story", appTags: ["story"], signal: options?.signal };
+  let rawOutput: string;
+  if (options?.stream && options.onStreamDelta) {
+    let accumulated = "";
+    let receivedDelta = false;
+    try {
+      const streamed = await sendLLMStreamRequest(apiConfig, preset, llmMessages, regexes, requestMeta, requestOptions, {
+        onDelta: (delta: string) => {
+          receivedDelta = true;
+          accumulated += delta;
+          options.onStreamDelta?.(accumulated);
+        },
+      });
+      rawOutput = streamed.content;
+    } catch (error) {
+      // 只有「一个字都没流出来」时才回退普通生成：已经输出过再回退会产生重复正文
+      if (receivedDelta || options.signal?.aborted) throw error;
+      rawOutput = await sendLLMRequest(apiConfig, preset, llmMessages, regexes, requestMeta, requestOptions);
+    }
+  } else {
+    rawOutput = await sendLLMRequest(apiConfig, preset, llmMessages, regexes, requestMeta, requestOptions);
+  }
 
-  const parsed = parseStoryResponse(rawOutput, regexes, {
+  // 尾部开关关闭时，即使模型照着习惯输出了状态栏/小剧场，也在解析前剔除，保证界面上不再出现
+  const blockedOutputTags = [
+    options?.settings?.generateStatusBar === false ? "story_status" : "",
+    options?.settings?.generateTheater === false ? "story_theater" : "",
+  ].filter(Boolean);
+  const outputToParse = blockedOutputTags.length
+    ? stripContextExcludedTags(rawOutput, blockedOutputTags.join(","))
+    : rawOutput;
+
+  const parsed = parseStoryResponse(outputToParse, regexes, {
     summaryTag,
     foldTags: effectiveFoldTags,
     macroEngine,
@@ -260,6 +303,7 @@ async function buildStoryPromptMessages(
   floatingChatContext?: string,
   participantIds?: string[],
   storyMemory?: StoryGenerationOptions["storyMemory"],
+  timeAware?: boolean,
 ): Promise<LLMMessage[]> {
   const character = loadCharacters().find((item) => item.id === characterId);
   if (!character) {
@@ -267,7 +311,15 @@ async function buildStoryPromptMessages(
   }
 
   const userIdentity = resolveUserIdentity(characterId, "story");
-  const historyMessages = history.map((message) => toHistoryMessage(message, contextExcludedTags));
+  // 尾部开关关闭时，也要从历史里剔除已生成的状态栏/小剧场，否则模型会照着历史继续输出
+  const blockedTailTags = [
+    settings?.generateStatusBar === false ? "story_status" : "",
+    settings?.generateTheater === false ? "story_theater" : "",
+  ].filter(Boolean);
+  const historyExcludedTags = blockedTailTags.length
+    ? [contextExcludedTags, ...blockedTailTags].join(",")
+    : contextExcludedTags;
+  const historyMessages = history.map((message) => toHistoryMessage(message, historyExcludedTags));
   const memConfig = loadMemoryConfig();
   const memorySettings = storyMemory?.memorySettings
     ? { ...resolveStoryMemorySettings(), ...storyMemory.memorySettings }
@@ -392,6 +444,14 @@ async function buildStoryPromptMessages(
     messages.push({ role: "system", content: "# 分线记忆隔离\n本分线不读取角色公共核心、长期或短期记忆；只根据角色设定与本分线自身聊天历史继续。" });
   }
   if (settingsPrompt) messages.push({ role: "system", content: settingsPrompt });
+  if (timeAware !== false) {
+    const pad = (value: number) => String(value).padStart(2, "0");
+    const weekday = ["日", "一", "二", "三", "四", "五", "六"][now.getDay()];
+    messages.push({
+      role: "system",
+      content: `# 时间感知\n当前真实日期时间：${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日 星期${weekday} ${pad(now.getHours())}:${pad(now.getMinutes())}。\n历史消息按发生时间先后排列，请据此理解剧情的时间流逝、昼夜与先后因果；不要凭空改写已经确定的时间。`,
+    });
+  }
   if (settings?.floatingPhoneInContext && floatingChatContext?.trim()) {
     messages.push({ role: "system", content: `# 悬浮小手机最近线上聊天\n以下记录用于衔接线上与线下剧情，不要逐字复述：\n${floatingChatContext.trim()}` });
   }

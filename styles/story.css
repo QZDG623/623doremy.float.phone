@@ -42,9 +42,6 @@
 .story-branch-export{flex:0 0 auto;width:31px;height:31px;display:grid;place-items:center;border:0;border-radius:9px;background:var(--c-story-panel,rgba(148,163,184,.10));color:var(--c-story-text,#475569)}
 .story-quick-story-backdrop{z-index:340}
 .story-quick-story-question{margin:4px 0 0;font-size:15px;line-height:1.65;color:var(--c-story-text,#334155)}
-.story-mini-phone-group-select{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid rgba(148,163,184,.16);font-size:11px;color:#64748b}
-.story-mini-phone-group-select select{min-width:0;flex:1;border:1px solid rgba(148,163,184,.22);border-radius:8px;padding:6px 8px;background:#fff;color:#334155}
-.story-mini-phone-group-empty{margin:0;padding:10px 12px;border-bottom:1px solid rgba(148,163,184,.16);font-size:11px;color:#b45309;background:#fffbeb}
 
         /* 顶部/底部光晕点缀，制造空气感 */
         .story-app-shell::before {
@@ -1111,26 +1108,9 @@
 
         .story-floating-phone-ball { position: absolute; right: 14px; bottom: calc(76px + env(safe-area-inset-bottom, 0px)); z-index: 15; width: 40px; height: 40px; padding: 0; border: 0; border-radius: 50%; background: color-mix(in srgb,var(--c-story-heading,#1e293b) 88%,transparent); color: #fff; box-shadow: 0 8px 25px rgba(15,23,42,.23); display: flex; align-items: center; justify-content: center; }
         .story-mini-phone-overlay { position: absolute; inset: 0; z-index: 330; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(15,23,42,.22); backdrop-filter: blur(5px); }
-        .story-mini-phone { width: min(286px, 82vw); height: min(520px, 72vh); border: 7px solid #171717; border-radius: 34px; overflow: hidden; display: flex; flex-direction: column; background: #f8fafc; box-shadow: 0 25px 80px rgba(15,23,42,.3); }
-        .story-mini-phone > header { min-height: 54px; display: grid; grid-template-columns: 34px 1fr 34px; align-items: center; padding: 9px 10px 5px; background: #fff; border-bottom: 1px solid #eef2f7; }
-        .story-mini-phone > header button { border: 0; background: transparent; display: flex; align-items: center; justify-content: center; }
-        .story-mini-phone > header div { display: flex; align-items: center; justify-content: center; gap: 7px; font-size: 11px; }
-        .story-mini-phone-messages { flex: 1; min-height: 0; overflow-y: auto; padding: 13px 10px; display: flex; flex-direction: column; gap: 10px; }
-        .story-mini-phone-messages > div { max-width: 82%; }
-        .story-mini-phone-messages > div[data-role="user"] { align-self: flex-end; text-align: right; }
-        .story-mini-phone-messages small { color: #94a3b8; font-size: 8px; }
-        .story-mini-phone-messages p { margin: 3px 0 0; padding: 7px 9px; border-radius: 12px; background: #fff; color: #334155; font-size: 10px; line-height: 1.55; text-align: left; white-space: pre-wrap; }
-        .story-mini-phone-messages > div[data-role="user"] p { background: #e2e8f0; }
-        .story-mini-phone-empty { margin: auto; color: #94a3b8; font-size: 10px; }
-        .story-mini-phone-typing { align-self: flex-start; display: flex; align-items: center; gap: 3px; min-width: 42px; padding: 10px; border-radius: 12px; background: #fff; }
-        .story-mini-phone-typing i { width: 4px; height: 4px; border-radius: 50%; background: #94a3b8; animation: story-mini-phone-dot 1s ease-in-out infinite; }
-        .story-mini-phone-typing i:nth-child(2) { animation-delay: .13s; }
-        .story-mini-phone-typing i:nth-child(3) { animation-delay: .26s; }
-        @keyframes story-mini-phone-dot { 0%,70%,100% { opacity: .25; transform: translateY(0); } 35% { opacity: 1; transform: translateY(-2px); } }
-        .story-mini-phone-composer { flex: 0 0 auto; display: flex; align-items: flex-end; gap: 7px; padding: 8px 9px calc(8px + env(safe-area-inset-bottom, 0px)); background: #fff; border-top: 1px solid #eef2f7; }
-        .story-mini-phone-composer textarea { flex: 1; min-width: 0; min-height: 31px; max-height: 72px; padding: 7px 9px; box-sizing: border-box; resize: none; border: 1px solid #e2e8f0; border-radius: 13px; outline: 0; background: #f8fafc; color: #334155; font: 400 10px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
-        .story-mini-phone-composer button { width: 31px; height: 31px; flex: 0 0 auto; padding: 0; border: 0; border-radius: 50%; background: #1e293b; color: #fff; display: flex; align-items: center; justify-content: center; }
-        .story-mini-phone-composer button:disabled { opacity: .35; }
+        .story-mini-phone { width: min(286px, 82vw); height: min(520px, 72vh); border: 7px solid #171717; border-radius: 34px; overflow: hidden; display: flex; flex-direction: column; background: #f8fafc; box-shadow: 0 25px 80px rgba(15,23,42,.3); position: relative; }
+        /* 悬浮小手机现在是完整聊天界面：可切换角色、查看联系人/朋友圈/设置 */
+        .story-mini-phone.story-mini-phone-full { width: min(372px, 94vw); height: min(736px, 86vh); border: 9px solid #171717; border-radius: 42px; background: #fff; position: relative; }
         .story-composer:focus-within textarea {
           background: var(--c-story-input-inner-focus, rgba(248, 250, 252, 0.94));
         }
@@ -1219,6 +1199,22 @@
             transform: translateY(-4px);
             opacity: 0.9;
           }
+        }
+        /* 流式预览：随模型返回实时增长的正文，结束后由正式消息替换 */
+        .story-streaming-bubble {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          opacity: 0.92;
+        }
+        .story-streaming-copy {
+          white-space: pre-wrap;
+          overflow-wrap: anywhere;
+          font-size: calc(14px*var(--app-text-scale,1));
+          line-height: 1.7;
+        }
+        .story-streaming-bubble .story-generating-dots {
+          align-self: flex-start;
         }
 
         /* === 富文本排版 (Typography Aesthetic) === */
@@ -1621,6 +1617,16 @@
         .story-directory-head button:last-child { color:#ef4444; }
         .story-directory-head button:disabled { opacity:.35; }
         .story-directory-list { display:flex; flex-direction:column; }
+        /* 目录按主线 / 分线 / 独立剧情分组，每组是一张可折叠的小卡片 */
+        .story-directory-group { margin-top:9px; border:1px solid rgba(100,116,139,.09); border-radius:16px; overflow:hidden; background:color-mix(in srgb,var(--c-story-bubble-bg,#fff) 96%,transparent); }
+        .story-directory-group:first-child { margin-top:0; }
+        .story-directory-group-head { display:flex; align-items:center; gap:8px; width:100%; min-height:48px; padding:0 14px; border:0; background:rgba(148,163,184,.09); color:var(--c-story-heading,#1e293b); font:600 calc(13px*var(--app-text-scale,1))/1 var(--story-font); text-align:left; }
+        .story-directory-group-head[data-static="true"] { cursor:default; }
+        .story-directory-group-arrow { flex:0 0 auto; color:var(--c-story-sub,#94a3b8); transition:transform .18s ease; }
+        .story-directory-group[data-open="true"] .story-directory-group-arrow { transform:rotate(90deg); }
+        .story-directory-group-count { margin-left:auto; min-width:24px; height:24px; padding:0 6px; display:inline-flex; align-items:center; justify-content:center; border-radius:999px; background:rgba(148,163,184,.16); color:var(--c-story-sub,#64748b); font-size:calc(10px*var(--app-text-scale,1)); font-weight:500; }
+        .story-directory-group-body { display:flex; flex-direction:column; }
+        .story-directory-group-empty { margin:0; padding:12px 14px; color:var(--c-story-sub,#94a3b8); font-size:calc(10px*var(--app-text-scale,1)); }
         .story-directory-row { display:grid; grid-template-columns:25px minmax(0,1fr) auto; align-items:center; min-height:68px; border-top:1px solid rgba(100,116,139,.07); }
         .story-directory-row[data-active="true"] { background:color-mix(in srgb,var(--c-story-heading,#1e293b) 4%,transparent); }
         .story-directory-check { display:grid; place-items:center; }

@@ -22,7 +22,6 @@ import {
   loadImageGenerationSettings,
   loadPresets,
   loadRegexes,
-  loadVoiceConfigs,
   loadWorldBooks,
   resolveBinding,
   resolveUserIdentity,
@@ -54,7 +53,9 @@ import {
 import { nativeToolProtocolForConfig } from "./llm-provider-adapter";
 import { stripHallucinatedTimestamps } from "./api-helpers";
 import { getEnabledTools } from "./tool-storage";
-import { getCustomStickerExample, getCustomStickerNames, resolveCustomStickerMap } from "./custom-sticker-storage";
+import { resolveCustomStickerMap } from "./custom-sticker-storage";
+import { getStickerPromptExample, getStickerPromptNames, resolveStickerImageMapForCloud } from "./sticker-data";
+import { resolveVoiceConfigCandidates } from "./tts-service";
 import { getChatImageFromIndexedDB } from "./chat-asset-storage";
 import { buildCalendarScheduleMarker, getCurrentCalendarScheduleForPrompt } from "./calendar-storage";
 import { getWeekStartIso } from "./calendar-utils";
@@ -635,9 +636,9 @@ export async function buildWeixinCloudRuntimeSnapshot(
     : undefined;
   if (!apiConfig) throw new Error(`角色「${character.name}」没有绑定可用于聊天的 API 配置。`);
 
-  const voiceConfig = bindingSlot.voiceConfigId
-    ? loadVoiceConfigs().find(item => item.id === bindingSlot.voiceConfigId) ?? null
-    : null;
+  // 和小手机语音条保持一致：绑定方案优先，绑定缺失/未填 Key 时兜底到其它可用方案，
+  // 否则微信端只能发一张不能播放的语音占位卡。
+  const voiceConfig = resolveVoiceConfigCandidates(character.id, "chat")[0] ?? null;
 
   const presets = loadPresets();
   const preset = bindingSlot.presetId
@@ -1085,7 +1086,7 @@ async function buildWeixinCloudPromptContext(params: {
     resolveVisionImagePromptLimit(params.session),
   );
 
-  const [memResults, coreResults, musicLocal, musicCloud, customStickerMap, imageGeneration] = await Promise.all([
+  const [memResults, coreResults, musicLocal, musicCloud, rawStickerMap, imageGeneration] = await Promise.all([
     retrieveMemoriesForPrompt(params.character.id, wbActivationContext, params.memoryConfig).catch(() => null),
     retrieveCoreMemoriesForPrompt(params.character.id, params.memoryConfig).catch(() => null),
     buildMusicLocalMacro(),
@@ -1093,6 +1094,8 @@ async function buildWeixinCloudPromptContext(params: {
     resolveCustomStickerMap(params.character.id).catch(() => ({} as Record<string, string>)),
     buildWeixinCloudImageGenerationContext(params.character.id).catch(() => undefined),
   ]);
+  // 自定义表情全部失效时改用内置 emoji 表情图，保证提示词里给出的表情名在微信端都能发出图片。
+  const customStickerMap = resolveStickerImageMapForCloud(params.character.id, rawStickerMap);
 
   const now = new Date();
   const promptTimeContext = buildCharacterTimeContext(params.character.timeZone, now);
@@ -1113,8 +1116,8 @@ async function buildWeixinCloudPromptContext(params: {
     coreMemories: coreResults ? formatCoreMemories(coreResults) : "",
     scheduleSummary: buildCalendarScheduleMarker("character", params.character.id, getWeekStartIso(now)),
     currentSchedule: getCurrentCalendarScheduleForPrompt("character", params.character.id, now),
-    customStickerNames: getCustomStickerNames(params.character.id),
-    customStickerExample: getCustomStickerExample(params.character.id),
+    customStickerNames: getStickerPromptNames(params.character.id),
+    customStickerExample: getStickerPromptExample(params.character.id),
     customStickerMap,
     imageGeneration,
     musicLocal,

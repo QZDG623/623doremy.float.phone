@@ -304,7 +304,8 @@ async function runImageGeneration(input: ImageGenerationRequest): Promise<{ stat
     const prompt = input.prompt?.trim();
     const referenceImageDataUrls = (Array.isArray(input.referenceImageDataUrls) ? input.referenceImageDataUrls : [])
       .filter((value): value is string => typeof value === "string" && Boolean(value.trim()));
-    if (referenceImageDataUrls.length === 0 && input.referenceImageDataUrl?.trim()) {
+    if (input.referenceImageDataUrl?.trim()
+      && !referenceImageDataUrls.includes(input.referenceImageDataUrl.trim())) {
       referenceImageDataUrls.push(input.referenceImageDataUrl.trim());
     }
     const hasReference = referenceImageDataUrls.length > 0;

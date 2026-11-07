@@ -71,6 +71,43 @@ function describeTopUsage(appUsage: PerceptionStatusSnapshot["appUsage"]): strin
   return `今天在 ${text}`;
 }
 
+/** 把「设备动作」说成人话。静止不单独说——「没在动」本身不是信息。 */
+function describeMotion(motion: PerceptionStatusSnapshot["motion"]): string {
+  if (!motion || motion.activity === "unknown") return "";
+  if (motion.activity === "walk") {
+    return motion.perMinute > 0 ? `正在走动（约每分钟 ${motion.perMinute} 步）` : "正在走动";
+  }
+  if (motion.activity === "lying") return "手机平放着，多半躺着";
+  return "";
+}
+
+/** 把环境噪音说成人话。安静（<40 分贝）不提，那是正常状态。 */
+function describeNoise(db: number): string {
+  if (!Number.isFinite(db) || db < 40) return "";
+  return `环境声大约 ${Math.round(db)} 分贝`;
+}
+
+/** 把「当前在听什么」说成人话。 */
+function describeNowPlaying(nowPlaying: PerceptionStatusSnapshot["nowPlaying"]): string {
+  if (!nowPlaying) return "";
+  const title = nowPlaying.title ? `《${nowPlaying.title}》` : "一首歌";
+  const artist = nowPlaying.artist ? `（${nowPlaying.artist}）` : "";
+  return nowPlaying.app
+    ? `正在用 ${nowPlaying.app} 听${title}${artist}`
+    : `正在听${title}${artist}`;
+}
+
+/** 把当天屏幕使用总时长说成人话（-1 = 读不到，直接省略）。 */
+function describeScreen(screenMinutes: number): string {
+  if (!Number.isFinite(screenMinutes) || screenMinutes < 0) return "";
+  const hours = Math.floor(screenMinutes / 60);
+  const mins = screenMinutes % 60;
+  if (hours <= 0) return `今天屏幕用了 ${mins} 分钟`;
+  return mins > 0
+    ? `今天屏幕用了 ${hours} 小时 ${mins} 分钟`
+    : `今天屏幕用了 ${hours} 小时`;
+}
+
 /**
  * 生成一段设备状态速写。
  *
@@ -97,6 +134,15 @@ export function describeStatus(status: PerceptionStatusSnapshot): string {
 
   if (status.steps >= 0) parts.push(`今天走了 ${status.steps} 步`);
 
+  const moving = describeMotion(status.motion);
+  if (moving) parts.push(moving);
+
+  const noise = describeNoise(status.noiseDb);
+  if (noise) parts.push(noise);
+
+  const listening = describeNowPlaying(status.nowPlaying);
+  if (listening) parts.push(listening);
+
   // 睡眠：只说时长，不说分期、不说几点睡的（那会暴露作息细节）。
   const slept = describeSleep(status.sleep);
   if (slept) parts.push(slept);
@@ -105,6 +151,9 @@ export function describeStatus(status: PerceptionStatusSnapshot): string {
   // 一次把十几项全念出来，角色会变成一块屏幕使用报告，而不是「瞥了一眼」。
   const usage = describeTopUsage(status.appUsage);
   if (usage) parts.push(usage);
+
+  const screen = describeScreen(status.screenMinutes);
+  if (screen) parts.push(screen);
 
   if (parts.length === 0) return "";
   const age = formatSince(status.at);
@@ -141,6 +190,18 @@ export function filterStatusBySwitches(
   }
   if (!isCapabilityEnabled(config, "usageStats")) {
     out.appUsage = [];
+  }
+  if (!isCapabilityEnabled(config, "screenUsage")) {
+    out.screenMinutes = -1;
+  }
+  if (!isCapabilityEnabled(config, "motion")) {
+    out.motion = null;
+  }
+  if (!isCapabilityEnabled(config, "noise")) {
+    out.noiseDb = -1;
+  }
+  if (!isCapabilityEnabled(config, "nowPlaying")) {
+    out.nowPlaying = null;
   }
   if (!isCapabilityEnabled(config, "location")) {
     out.location = null;
@@ -191,6 +252,18 @@ export function describeStatusByFocus(status: PerceptionStatusSnapshot, focus?: 
     }
   } else if (key === "steps" || key === "步数") {
     if (status.steps >= 0) parts.push(`今天走了 ${status.steps} 步`);
+  } else if (key === "motion" || key === "运动" || key === "走动") {
+    const moving = describeMotion(status.motion);
+    if (moving) parts.push(moving);
+  } else if (key === "noise" || key === "噪音" || key === "声音") {
+    const noise = describeNoise(status.noiseDb);
+    if (noise) parts.push(noise);
+  } else if (key === "nowplaying" || key === "在听" || key === "音乐") {
+    const listening = describeNowPlaying(status.nowPlaying);
+    if (listening) parts.push(listening);
+  } else if (key === "screen" || key === "屏幕" || key === "屏幕使用") {
+    const screen = describeScreen(status.screenMinutes);
+    if (screen) parts.push(screen);
   } else if (key === "sleep" || key === "睡眠" || key === "睡") {
     const slept = describeSleep(status.sleep);
     if (slept) parts.push(slept);

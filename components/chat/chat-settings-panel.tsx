@@ -330,6 +330,9 @@ export function ChatSettingsPanel({
     const [refreshingCharacterRemark, setRefreshingCharacterRemark] = useState(false);
     const [videoBackground, setVideoBackground] = useState<string>(session.videoBackground || "");
     const [voiceBackground, setVoiceBackground] = useState<string>(session.voiceBackground || "");
+    const [callImage, setCallImage] = useState<string>(session.callImage || "");
+    const [callImageTalk, setCallImageTalk] = useState<string>(session.callImageTalk || "");
+    const [callImageBlink, setCallImageBlink] = useState<string>(session.callImageBlink || "");
     const [isPinned, setIsPinned] = useState(session.isPinned || false);
     // 仿真拉黑：拉黑期间用户发出的消息会被对方拒收（仿微信红色感叹号）
     const [isBlacklisted, setIsBlacklisted] = useState(session.isBlacklisted || false);
@@ -629,6 +632,7 @@ export function ChatSettingsPanel({
     const userIdentity = resolveUserIdentity(session.isGroup ? undefined : session.contactId, session.isGroup ? "group_chat" : "chat");
     const effectiveUserAvatar = resolveChatUserAvatar(session, userIdentity?.avatarUrl);
     const [notifyAvatarChange, setNotifyAvatarChange] = useState(session.notifyCharacterOnUserAvatarChange !== false);
+    const [allowAvatarFromChat, setAllowAvatarFromChat] = useState(session.allowCharacterAvatarFromChat !== false);
 
     const updateOwnAvatar = async (file: File) => {
         const avatarUrl = await fileToAvatarDataUrl(file);
@@ -932,6 +936,28 @@ export function ChatSettingsPanel({
             console.error("Failed to save image", error);
             alert("图片保存失败，请重试");
         }
+    };
+
+    // 把本会话的角色形象三层图存为该角色的默认形象（所有会话通用）
+    const applyCallImageAsCharacterDefault = () => {
+        if (!character || !callImage) return;
+        const latest = loadCharacters();
+        saveCharacters(latest.map(c => c.id === character.id
+            ? {
+                ...c,
+                callImage,
+                callImageTalk: callImageTalk || undefined,
+                callImageBlink: callImageBlink || undefined,
+            }
+            : c));
+        alert(`已保存为「${character.name}」的默认通话形象，该角色所有会话的视频通话都会使用`);
+    };
+
+    const clearSessionCallImages = () => {
+        setCallImage("");
+        setCallImageTalk("");
+        setCallImageBlink("");
+        updateSession({ callImage: "", callImageTalk: "", callImageBlink: "" });
     };
 
     // Group video: per-participant background upload
@@ -1308,6 +1334,21 @@ export function ChatSettingsPanel({
 
                 {/* Toggles */}
                 <div className="menu-group">
+                    {!session.isGroup && (
+                        <div className="menu-item">
+                            <ChatInfoIcon icon={Sparkles} color={BINDING_ACCENTS.preset} />
+                            <div className="menu-label-group">
+                                <span className="menu-label">允许强制开启线下剧情</span>
+                                <span className="menu-desc">角色非常渴望见面、准备惊喜或主动推进见面时，可直接创建衔接记忆分线并进入剧情</span>
+                            </div>
+                            <div className="menu-right">
+                                <Toggle
+                                    checked={session.allowForcedOfflineStory !== false}
+                                    onChange={c => updateSession({ allowForcedOfflineStory: c })}
+                                />
+                            </div>
+                        </div>
+                    )}
                     <div className="menu-item">
                         <ChatInfoIcon icon={Pin} color={BINDING_ACCENTS.preset} />
                         <div className="menu-label-group"><span className="menu-label">置顶聊天</span></div>
@@ -1559,6 +1600,66 @@ export function ChatSettingsPanel({
                             </div>
                             <input type="file" accept="image/*" onChange={e => handleImageUpload(e, setVideoBackground, "videoBackground")} className="hidden" />
                         </label>
+                    )}
+
+                    {/* 视频通话角色形象：三段差分图 → 说话张嘴 / 随机眨眼（仅私聊） */}
+                    {!session.isGroup && (
+                        <>
+                            <label className="menu-item" style={{ paddingLeft: 72 }}>
+                                <div className="w-[24px] h-[24px] rounded-full overflow-hidden bg-[var(--c-input)] shrink-0 flex items-center justify-center">
+                                    <ImageIcon size={13} />
+                                </div>
+                                <div className="menu-label-group"><span className="menu-label">角色形象（闭嘴）</span><span className="menu-desc">视频通话大画面</span></div>
+                                <div className="menu-right">
+                                    {callImage && <><span className="menu-desc mr-1">已设置</span><button className="menu-desc mr-1 text-[var(--c-danger)]" onClick={e => { e.preventDefault(); setCallImage(""); updateSession({ callImage: "" }); }}>清除</button></>}
+                                    <ChevronRight size={16} />
+                                </div>
+                                <input type="file" accept="image/*" onChange={e => handleImageUpload(e, setCallImage, "callImage")} className="hidden" />
+                            </label>
+                            <label className="menu-item" style={{ paddingLeft: 72 }}>
+                                <div className="w-[24px] h-[24px] rounded-full overflow-hidden bg-[var(--c-input)] shrink-0 flex items-center justify-center">
+                                    <Smile size={13} />
+                                </div>
+                                <div className="menu-label-group"><span className="menu-label">说话张嘴图</span><span className="menu-desc">角色说话时叠加</span></div>
+                                <div className="menu-right">
+                                    {callImageTalk && <><span className="menu-desc mr-1">已设置</span><button className="menu-desc mr-1 text-[var(--c-danger)]" onClick={e => { e.preventDefault(); setCallImageTalk(""); updateSession({ callImageTalk: "" }); }}>清除</button></>}
+                                    <ChevronRight size={16} />
+                                </div>
+                                <input type="file" accept="image/*" onChange={e => handleImageUpload(e, setCallImageTalk, "callImageTalk")} className="hidden" />
+                            </label>
+                            <label className="menu-item" style={{ paddingLeft: 72 }}>
+                                <div className="w-[24px] h-[24px] rounded-full overflow-hidden bg-[var(--c-input)] shrink-0 flex items-center justify-center">
+                                    <Camera size={13} />
+                                </div>
+                                <div className="menu-label-group"><span className="menu-label">眨眼闭眼图</span><span className="menu-desc">平时随机眨眼</span></div>
+                                <div className="menu-right">
+                                    {callImageBlink && <><span className="menu-desc mr-1">已设置</span><button className="menu-desc mr-1 text-[var(--c-danger)]" onClick={e => { e.preventDefault(); setCallImageBlink(""); updateSession({ callImageBlink: "" }); }}>清除</button></>}
+                                    <ChevronRight size={16} />
+                                </div>
+                                <input type="file" accept="image/*" onChange={e => handleImageUpload(e, setCallImageBlink, "callImageBlink")} className="hidden" />
+                            </label>
+                            <div className="menu-item" style={{ cursor: "default", paddingLeft: 72 }}>
+                                <span className="menu-desc" style={{ whiteSpace: "normal", lineHeight: 1.5 }}>
+                                    三张图需同一构图、同尺寸（透明 PNG 差分图最佳）。只传第一张＝静态图；补上张嘴/闭眼图后，角色说话会张嘴、平时随机眨眼。
+                                </span>
+                            </div>
+                            <button className="menu-item" style={{ paddingLeft: 72 }} disabled={!callImage} onClick={applyCallImageAsCharacterDefault}>
+                                <div className="w-[24px] h-[24px] rounded-full overflow-hidden bg-[var(--c-input)] shrink-0 flex items-center justify-center">
+                                    <Save size={13} />
+                                </div>
+                                <div className="menu-label-group"><span className="menu-label">设为角色默认形象</span><span className="menu-desc">该角色所有会话通用</span></div>
+                                <div className="menu-right"><ChevronRight size={16} /></div>
+                            </button>
+                            {(callImage || callImageTalk || callImageBlink) && (
+                                <button className="menu-item" style={{ paddingLeft: 72 }} onClick={clearSessionCallImages}>
+                                    <div className="w-[24px] h-[24px] rounded-full overflow-hidden bg-[var(--c-input)] shrink-0 flex items-center justify-center">
+                                        <RefreshCw size={13} />
+                                    </div>
+                                    <div className="menu-label-group"><span className="menu-label">恢复角色默认形象</span><span className="menu-desc">清除本会话覆盖</span></div>
+                                    <div className="menu-right"><ChevronRight size={16} /></div>
+                                </button>
+                            )}
+                        </>
                     )}
                     <label className="menu-item">
                         <ChatInfoIcon icon={Mic} color={BINDING_ACCENTS.voice} />
@@ -2064,12 +2165,19 @@ export function ChatSettingsPanel({
                         )}
                         <div className="mt-2 flex items-center gap-2 rounded-xl bg-[var(--c-card-bg)] px-3 py-2">
                             <div className="min-w-0 flex-1">
+                                <div className="ts-12 font-medium text-[var(--c-text-title)]">聊天中允许角色自主换头像</div>
+                                <div className="mt-0.5 ts-10 opacity-55">你发图并说“当头像使用”时，角色会按要求换上这张图</div>
+                            </div>
+                            <Toggle checked={allowAvatarFromChat} onChange={checked => { setAllowAvatarFromChat(checked); updateSession({ allowCharacterAvatarFromChat: checked }); }} />
+                        </div>
+                        <div className="mt-2 flex items-center gap-2 rounded-xl bg-[var(--c-card-bg)] px-3 py-2">
+                            <div className="min-w-0 flex-1">
                                 <div className="ts-12 font-medium text-[var(--c-text-title)]">我更换头像后希望对方做出反应</div>
                                 <div className="mt-0.5 ts-10 opacity-55">开启后写入短期记忆并立即通知对方</div>
                             </div>
                             <Toggle checked={notifyAvatarChange} onChange={checked => { setNotifyAvatarChange(checked); updateSession({ notifyCharacterOnUserAvatarChange: checked }); }} />
                         </div>
-                        <p className="mt-2 px-1 ts-10 leading-4 opacity-50">聊天中发送图片并暗示对方换头像时，角色仍会按人设自行决定。</p>
+                        <p className="mt-2 px-1 ts-10 leading-4 opacity-50">聊天中发送图片并说“当头像使用”时，角色会主动把图片换成自己的头像；关闭上面的开关可停用。</p>
                         <input ref={ownAvatarInputRef} type="file" accept="image/*" className="hidden" onChange={event => void handleAvatarInput(event, "own")} />
                         <input ref={characterAvatarInputRef} type="file" accept="image/*" className="hidden" onChange={event => void handleAvatarInput(event, "character")} />
                     </div>

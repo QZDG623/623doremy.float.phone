@@ -31,6 +31,7 @@ import {
     type IdleReconnectRule,
 } from "./idle-reconnect-storage";
 import { loadFollowUpConfig } from "./settings-storage";
+import { storyBlocksBackgroundActivity } from "./story-generation-prefs";
 import { beginTurn, type TurnHandle } from "./turn-coordinator";
 import { parseAIResponse } from "./rich-message-parser";
 import type { ParsedMessagePart } from "./rich-message-parser";
@@ -122,9 +123,26 @@ const backgroundReplyFiringSet = new Set<string>();
 // 聊天室挂载时查询它：中途进入也能立刻显示「正在输入」，补上事件错过的缝
 const backgroundGeneratingSessions = new Set<string>();
 const cancelledBackgroundSessions = new Set<string>();
-// Background completions have their own request lifecycle. Keep the controller so a
-// newer user turn can abort the actual provider request, not merely mark its result stale.
+// 主动发消息的 API 请求控制器：剧情页打开时 cancelBackgroundGeneration 直接用 abort
+// 中止请求，而不是等模型返回后才丢弃结果。
 const backgroundAbortControllers = new Map<string, AbortController>();
+
+function createBackgroundAbortController(sessionId: string): AbortController {
+    backgroundAbortControllers.get(sessionId)?.abort();
+    const controller = new AbortController();
+    backgroundAbortControllers.set(sessionId, controller);
+    return controller;
+}
+
+function releaseBackgroundAbortController(sessionId: string, controller: AbortController): void {
+    if (backgroundAbortControllers.get(sessionId) === controller) backgroundAbortControllers.delete(sessionId);
+}
+
+/** 当前角色是否正被剧情页占用（占用时后台主动发消息应让路）。 */
+function shouldYieldToStory(session: { contactId?: string; participantIds?: string[] }): boolean {
+    const ids = [session.contactId, ...(session.participantIds || [])].filter(Boolean) as string[];
+    return ids.some((id) => storyBlocksBackgroundActivity(id));
+}
 
 /** 该会话是否正有后台回复在生成（聊天室中途挂载时用来恢复输入中状态）。 */
 export function isBackgroundReplyGenerating(sessionId: string): boolean {
@@ -137,6 +155,7 @@ export function cancelBackgroundGeneration(sessionId: string): void {
     cancelledBackgroundSessions.add(sessionId);
     controller?.abort();
     if (firingSet.has(sessionId)) cancelledWhileFiring.add(sessionId);
+    backgroundAbortControllers.get(sessionId)?.abort();
     cancelFollowUpBailout(sessionId);
 }
 
@@ -249,11 +268,12 @@ export async function requestBackgroundChatReply(
     if (backgroundReplyFiringSet.has(sessionId)) return { ok: false, skipped: "already_running" };
     const session = loadChatSessions().find(s => s.id === sessionId);
     if (!session) return { ok: false, skipped: "missing_session" };
+    // 剧情页正在使用该角色：后台主动发消息让路，不发请求
+    if (shouldYieldToStory(session)) return { ok: false, skipped: "story_foreground" };
     if (isLifeCharacterSleeping(sessionId)) return { ok: false, skipped: "character_sleeping" };
 
     backgroundReplyFiringSet.add(sessionId);
-    const backgroundController = new AbortController();
-    backgroundAbortControllers.set(sessionId, backgroundController);
+    const controller = createBackgroundAbortController(sessionId);
     try {
         const latestMessages = loadChatMessages(session.id);
         backgroundGeneratingSessions.add(session.id);
@@ -264,12 +284,14 @@ export async function requestBackgroundChatReply(
             {
                 appId: options?.appId,
                 appTags: options?.appTags ?? (session.isGroup ? undefined : ["chat", "text"]),
-                signal: backgroundController.signal,
                 // 定时查岗等事件可带一句「该怎么回应」，只作用于这一轮
                 ephemeralSystemNote: options?.ephemeralSystemNote,
+                signal: controller.signal,
             },
         );
-        if (backgroundController.signal.aborted || isBackgroundGenerationCancelled(session.id)) return { ok: false, skipped: "cancelled" };
+        if (controller.signal.aborted || isBackgroundGenerationCancelled(session.id)) {
+            return { ok: false, skipped: "cancelled" };
+        }
         const { hasVisible, stateValues } = await saveBackgroundCompletionRounds(
             rounds,
             session.id,
@@ -284,7 +306,7 @@ export async function requestBackgroundChatReply(
     } catch (error: unknown) {
         // Aborting because a newer user turn arrived is normal control flow, not an error
         // to append to the chat (which itself would be an out-of-context late write).
-        if (backgroundController.signal.aborted || isBackgroundGenerationCancelled(sessionId)) {
+        if (controller.signal.aborted || isBackgroundGenerationCancelled(sessionId)) {
             return { ok: false, skipped: "cancelled" };
         }
         console.error("[BackgroundReply] Error:", error);
@@ -296,7 +318,7 @@ export async function requestBackgroundChatReply(
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId } }));
         return { ok: false };
     } finally {
-        if (backgroundAbortControllers.get(sessionId) === backgroundController) backgroundAbortControllers.delete(sessionId);
+        releaseBackgroundAbortController(sessionId, controller);
         backgroundGeneratingSessions.delete(sessionId);
         cancelledBackgroundSessions.delete(sessionId);
         backgroundReplyFiringSet.delete(sessionId);
@@ -521,12 +543,15 @@ async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?
 
     firingSet.add(sched.sessionId);
     clearFollowUpSchedule(sched.sessionId); // clear before firing
+    const controller = createBackgroundAbortController(sched.sessionId);
 
     let turn: TurnHandle | null = null;
     try {
         const sessions = loadChatSessions();
         const session = sessions.find(s => s.id === sched.sessionId);
         if (!session) return;
+        // 剧情页正在使用该角色：后台追问让路
+        if (shouldYieldToStory(session)) return;
         const characterId = resolveSessionCharacterId(session);
         if (!characterId || isCharacterCoPresentInLifeScene(characterId)) return;
         turn = beginTurn({ kind: "followup", characterId, sessionId: session.id });
@@ -587,14 +612,14 @@ async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?
             rounds = await generateBackgroundCompletionRounds(
                 session,
                 messagesWithHint,
-                { followUpCount: count, followUpDelay: sched.delaySec ?? 60, appTags: ["chat", "text", "followup"], signal: turn.signal },
+                { followUpCount: count, followUpDelay: sched.delaySec ?? 60, appTags: ["chat", "text", "followup"], signal: controller.signal },
             );
         } finally {
             stopBailoutHeartbeat();
         }
 
         // User sent a message while we were waiting for the API — discard result
-        if (cancelledWhileFiring.has(sched.sessionId) || isBackgroundGenerationCancelled(sched.sessionId) || turn.signal.aborted || !turn.isCurrent()) {
+        if (controller.signal.aborted || cancelledWhileFiring.has(sched.sessionId) || isBackgroundGenerationCancelled(sched.sessionId) || turn.signal.aborted || !turn.isCurrent()) {
             console.log(`[FollowUp] Cancelled during API call, discarding result for session=${sched.sessionId}`);
             cancelledWhileFiring.delete(sched.sessionId);
             return;
@@ -615,7 +640,8 @@ async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
 
     } catch (error: unknown) {
-        if (turn?.signal.aborted) {
+        if (controller.signal.aborted || isBackgroundGenerationCancelled(sched.sessionId) || turn?.signal.aborted) {
+            console.log(`[FollowUp] Aborted while generating for session=${sched.sessionId}`);
             window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: sched.sessionId } }));
             return;
         }
@@ -627,6 +653,7 @@ async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?
         });
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: sched.sessionId } }));
     } finally {
+        releaseBackgroundAbortController(sched.sessionId, controller);
         turn?.end();
         backgroundGeneratingSessions.delete(sched.sessionId);
         cancelledBackgroundSessions.delete(sched.sessionId);
@@ -1166,9 +1193,14 @@ export async function parseAndSaveResponse(
     for (const p of parts) {
         if (p.mediaType === "voice_call") { triggerCall = "voice"; continue; }
         if (p.mediaType === "video_call") { triggerCall = "video"; continue; }
-        // 「丢弃角色输出的无效表情包」开关（主动消息路径）
-        if (p.mediaType === "sticker" && sess?.discardInvalidStickers === true) {
-            const senderIds = sess.isGroup ? (sess.participantIds ?? []) : (resolveSessionCharacterId(sess) ? [resolveSessionCharacterId(sess)!] : []);
+        // 无效/已删除的表情包默认丢弃，避免以 `[表情包名]` 文字形式发出；
+        // 会话设置里可显式关闭（discardInvalidStickers === false）。
+        if (p.mediaType === "sticker" && sess?.discardInvalidStickers !== false) {
+            const senderIds = sess
+                ? (sess.isGroup
+                    ? (sess.participantIds ?? [])
+                    : (resolveSessionCharacterId(sess) ? [resolveSessionCharacterId(sess)!] : []))
+                : [];
             if (!isKnownStickerLabel(p.mediaData?.label || "", senderIds)) continue;
         }
         if (p.mediaType === "accept_red_packet" || p.mediaType === "decline_red_packet"

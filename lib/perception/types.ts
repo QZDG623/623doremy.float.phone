@@ -50,6 +50,17 @@ export type PerceptionCapability =
   | "usageStats"
   | "steps"
   | "sleep"
+  /**
+   * 设备动作：走 / 静止 / 躺。原生用步数变化率 + 加速度计重力方向判断，
+   * 不接 Google Play 的活动识别（国内机型不一定有）。
+   */
+  | "motion"
+  /** 环境噪音（近似分贝）。原生采样 0.4 秒，只回一个数字，不保留音频。 */
+  | "noise"
+  /** 当前在听什么（歌名/歌手/App）。需要「通知使用权」。 */
+  | "nowPlaying"
+  /** 屏幕使用总时长（今天各应用前台时长之和）。与 usageStats 同一份数据。 */
+  | "screenUsage"
   | "returnToPhone"
   /**
    * 作息与习惯：深夜还醒着、今天第一次打开、很久没来聊天。
@@ -78,6 +89,10 @@ export const PERCEPTION_CAPABILITY_LABEL: Record<PerceptionCapability, string> =
   usageStats: "使用统计",
   steps: "步数",
   sleep: "睡眠",
+  motion: "设备运动",
+  noise: "环境噪音",
+  nowPlaying: "当前在听",
+  screenUsage: "屏幕使用时长",
   returnToPhone: "回到手机提醒",
   lifeRhythm: "作息与习惯",
   deviceAction: "设备操作",
@@ -93,6 +108,10 @@ export const PERCEPTION_CAPABILITY_DESC: Record<PerceptionCapability, string> = 
   usageStats: "汇总当天各应用使用时长；某个应用累计用满设定时长时报一条「应用用太久」。需要「使用情况访问」权限。",
   steps: "读取当天步数，作为「在走动 / 宅着」的粗线索。需要活动识别权限。",
   sleep: "读取最近一觉的时长与起止。只读睡眠，不含睡眠分期；数据来自 Health Connect。",
+  motion: "走 / 静止 / 躺。用步数变化率与加速度计的重力方向判断，状态变化时告诉角色。需要活动识别权限。",
+  noise: "隔一段时间测一次环境噪音，太吵时告诉角色。需要录音权限；只测 0.4 秒，不保留音频。",
+  nowPlaying: "正在听的歌名/歌手/是哪个 App。需要「通知使用权」。",
+  screenUsage: "今天屏幕一共用了多久（各应用前台时长之和），随使用统计一起给角色看。需要「使用情况访问」权限。",
   returnToPhone: "离开一段时间后回到小手机时，给角色一个「TA 回来了」的信号。纯网页实现，无需额外权限。",
   lifeRhythm: "深夜还醒着、今天第一次打开小手机、很久没来聊天时给角色一个信号。纯网页实现，无需额外权限。",
   deviceAction: "角色在真实手机上执行的动作（手电筒、音量、亮度、勿扰、打开应用等），记进流水供你回查。",
@@ -151,6 +170,53 @@ export type PerceptionConfig = {
   queryCooldownMinutes: number;
   /** 是否把聚合后的设备快照同步到云端，供角色离线生成时参考。默认关。 */
   cloudSyncEnabled: boolean;
+  /**
+   * 「一打开就提醒」的关注应用列表（显示名或包名的包含匹配，不区分大小写）。
+   *
+   * 与 appUsageSignalOverrides 的区别：那张表看的是「用了多久」，
+   * 这张表看的是「一打开就发生」——用户要的往往正是后者（比如刷短视频
+   * 一进去就该被拦一下，而不是等到 20 分钟）。空数组 = 关闭这个能力。
+   */
+  appOpenWatchList: string[];
+  /** 命中关注应用时，是否顺手把用户拉回小手机（需要安卓壳，默认开）。 */
+  appOpenReturnToFloat: boolean;
+  /**
+   * 几点该睡觉：到点产生一条「该睡觉了」（每天最多一条）。-1 = 关。
+   * 与深夜信号的差别：这条是用户主动设定的时间点，不受安静时段影响
+   * （见引擎里的 emitSignal 特例）。
+   */
+  bedtimeHour: number;
+  bedtimeMinute: number;
+  /** 睡眠锁：到点后打开异常应用会被原生全屏遮罩挡住，逼 TA 去睡觉。 */
+  sleepLockEnabled: boolean;
+  /** 锁定时段起点 HH:MM（可跨午夜，如 22:30 → 07:00）。 */
+  sleepLockStart: string;
+  /** 锁定时段终点 HH:MM。 */
+  sleepLockEnd: string;
+  /** 要锁的应用（显示名或包名的包含匹配）。空数组 = 除小手机自身外的所有应用。 */
+  sleepLockApps: string[];
+  /** 遮罩上的那句话。 */
+  sleepLockMessage: string;
+  /**
+   * 同一个应用连续用满多少分钟就强制处置（回小手机 / 全屏锁定）。0 = 关。
+   *
+   * 与「应用停留时长」的区别：那条只是产生一个信号；这条是**真的动手**，
+   * 由原生守卫执行——网页切到别的 App 后会被冻结，等网页来拦就来不及了。
+   */
+  overuseMinutes: number;
+  /** 命中后做什么：return = 拉回小手机；lock = 全屏遮罩锁住该应用。 */
+  overuseAction: "return" | "lock";
+  /** 要管的应用（显示名或包名包含匹配）。空数组 = 除小手机外的所有应用。 */
+  overuseApps: string[];
+  /**
+   * 这些应用超时后一律「全屏锁定」，不看 overuseAction。
+   *
+   * 用户的两条诉求可以同时成立：普通应用用太久先拉回小手机，
+   * 短视频这类专门列出来的应用直接锁死。留空 = 全部按 overuseAction。
+   */
+  overuseLockApps: string[];
+  /** 锁定/拉回遮罩上的那句话。 */
+  overuseMessage: string;
 };
 
 export const PERCEPTION_DEFAULTS: PerceptionConfig = {
@@ -173,6 +239,20 @@ export const PERCEPTION_DEFAULTS: PerceptionConfig = {
   injectStatus: false,
   queryCooldownMinutes: 5,
   cloudSyncEnabled: false,
+  appOpenWatchList: [],
+  appOpenReturnToFloat: true,
+  bedtimeHour: -1,
+  bedtimeMinute: 0,
+  sleepLockEnabled: false,
+  sleepLockStart: "23:00",
+  sleepLockEnd: "07:00",
+  sleepLockApps: [],
+  sleepLockMessage: "该睡觉啦，把手机放下，明天再玩。",
+  overuseMinutes: 0,
+  overuseAction: "return",
+  overuseApps: [],
+  overuseLockApps: [],
+  overuseMessage: "这个应用用太久了，先回小手机歇一会儿吧。",
 };
 
 export const PERCEPTION_LIMITS = {
@@ -190,6 +270,10 @@ export const PERCEPTION_LIMITS = {
   noTalkHours: { min: 0, max: 336 },
   sitStillMinutes: { min: 0, max: 720 },
   queryCooldownMinutes: { min: 0, max: 720 },
+  bedtimeHour: { min: -1, max: 23 },
+  bedtimeMinute: { min: 0, max: 59 },
+  // 允许 0：那是「不强制拦应用」的合法取值
+  overuseMinutes: { min: 0, max: 720 },
 } as const;
 
 /** 一条待投递的感知信号。type 直接写成人类可读的事件名，规则里 matchType 就能匹配。 */
@@ -215,6 +299,27 @@ export type PerceptionLogEntry = {
   skipped?: string;
 };
 
+/** 设备动作（走 / 静止 / 躺）。 */
+export type MotionSnapshot = {
+  /** walk = 在走；still = 静止（坐着/站着）；lying = 手机平放，多半躺着 */
+  activity: "walk" | "still" | "lying" | "unknown";
+  /** 屏幕朝向：flat = 平放；upright = 竖着；unknown = 没有加速度计 */
+  posture: "flat" | "upright" | "unknown";
+  /** 距上次取样的步数增量；-1 = 未知 */
+  stepsDelta: number;
+  /** 每分钟步数；-1 = 未知 */
+  perMinute: number;
+};
+
+/** 当前正在播放的媒体。 */
+export type NowPlayingSnapshot = {
+  playing: boolean;
+  /** 播放 App 的显示名 */
+  app: string;
+  title: string;
+  artist: string;
+};
+
 /** 设备状态缓存：引擎每次采样后写入，供「注入 / 主动查询 / 云端同步」三处读取。 */
 export type PerceptionStatusSnapshot = {
   /** 采集时刻 */
@@ -231,6 +336,14 @@ export type PerceptionStatusSnapshot = {
   foregroundMinutes: number;
   /** 当天步数，-1 = 未知 */
   steps: number;
+  /** 设备动作；null = 未开启 / 读不到 */
+  motion: MotionSnapshot | null;
+  /** 环境噪音（近似分贝）；-1 = 未开启 / 读不到 */
+  noiseDb: number;
+  /** 当前在听什么；null = 未开启 / 没在听 / 读不到 */
+  nowPlaying: NowPlayingSnapshot | null;
+  /** 今天屏幕使用总时长（分钟）；-1 = 未授权 / 读不到 */
+  screenMinutes: number;
   /** 今天各应用使用时长（按时长降序，最多 12 条）；空数组 = 未授权或读不到 */
   appUsage: AppUsageEntry[];
   /**

@@ -19,12 +19,37 @@ export function resolveVoiceConfig(characterId: string, appId?: ContentAppId): V
 }
 
 /**
+ * 合成时可尝试的语音方案：绑定方案优先，再兜底其它已配置 Key 的合成方案。
+ *
+ * 为什么需要兜底：绑定槽位可能指向一个还没填 Key 的默认方案（新建配置后忘了
+ * 重新绑定），此时绑定方案必然失败。语音条是刚需，只要用户配置过任何一个
+ * 可用的合成方案，就应该能出声，而不是整条语音都变成「合成失败」。
+ */
+export function resolveVoiceConfigCandidates(characterId?: string, appId?: ContentAppId): VoiceApiConfig[] {
+    const bound = characterId ? resolveVoiceConfig(characterId, appId) : null;
+    const list: VoiceApiConfig[] = [];
+    if (bound && bound.apiKey?.trim()) list.push(bound);
+    try {
+        const configs = loadVoiceConfigs();
+        for (const config of configs) {
+            if (config.enableTTS === false || !config.apiKey?.trim()) continue;
+            if (list.some(item => item.id === config.id)) continue;
+            list.push(config);
+        }
+    } catch {
+        /* 配置读不出来时只保留绑定方案 */
+    }
+    return list;
+}
+
+/**
  * Synthesize speech from text using the given voice config.
  * Returns an audio Blob (mp3/wav) or null if synthesis failed.
  *
  * Supported providers:
  * - Minimax: REST API → hex-encoded mp3
  * - OpenAI: REST API → binary audio blob
+ * - FishAudio: 经服务端中转 /api/voice/fish-tts → 二进制音频
  */
 export async function synthesizeSpeech(
     text: string,
@@ -33,14 +58,49 @@ export async function synthesizeSpeech(
 ): Promise<Blob | null> {
     if (!text.trim()) return null;
 
-    const provider = voiceConfig.provider;
+    const provider = voiceConfig.provider?.trim();
+    // 兼容大小写/空格差异（旧配置里出现过 "minimax" / "Fish Audio"），
+    // 否则会落进最后的 return null，界面只显示「合成失败」而看不出原因。
+    const providerKey = provider?.toLowerCase().replace(/\s+/g, "");
 
-    if (provider === "Minimax") {
-        return synthesizeMinimax(text, voiceConfig, options?.emotion);
+    if (providerKey === "minimax") {
+        // 只念台词：先剥离 HTML/CSS 与旁白，并保留世界书的 (breath) 等 Sound Tag。
+        // dropLatin 必须为 false —— 台词正文里的英文要照常念出来。
+        const speechText = sanitizeSpeechText(text, { keepSoundTags: true, dropLatin: false });
+        if (!speechText) return null;
+        // 只写了 (breath)/(sighs) 之类表演标记、没有一句台词的消息不算台词
+        // （聊天显示层已把这类消息整条隐藏），不该合成出一段没有人话的音频。
+        if (!hasSpeakableContent(speechText)) return null;
+        // 角色自己没写呼吸标记时补上——匀速念完是"AI 腔"的主要来源。
+        const performed = addMinimaxBreathMarks(speechText);
+        // 调用方显式给了情绪就用它，否则按台词里的标签/关键词推断。
+        // 情绪必须在"标签还在"的时候推断，转换后就只剩停顿标记了。
+        const emotion = options?.emotion?.trim() || inferMinimaxEmotion(performed) || undefined;
+        // 关键：括号内一律不得进 MiniMax TTS。
+        // MiniMax speech-01 对 <#x#> 停顿标记不认、对括号 Sound Tag 也只在部分
+        // 账号/模型上认，所以 Sound Tag → <#x#> 这条路走不通。终极策略：所有括号
+        // 整块删掉；MiniMax 官方 Sound Tag 换成中文标点让 MiniMax 自然断句产生
+        // 换气/停顿的活人感。用户自定义的动作括号直接删掉。
+        const finalText = stripBracketsWithPunctuation(performed);
+        if (!hasSpeakableContent(finalText)) return null;
+        return synthesizeMinimax(finalText, voiceConfig, emotion);
     }
 
-    if (provider === "OpenAI") {
-        return synthesizeOpenAI(text, voiceConfig);
+    if (providerKey === "openai") {
+        // OpenAI TTS 不认 Sound Tag，会把标签当文本念出来，所以一并清掉；
+        // 它也没有情绪参数，纯英文角色要能正常发声，故保留英文。
+        const speechText = sanitizeSpeechText(text, { keepSoundTags: false, dropLatin: false });
+        if (!speechText) return null;
+        return synthesizeOpenAI(speechText, voiceConfig);
+    }
+
+    if (providerKey === "fishaudio") {
+        // 括号里的表演标记（(breath)/(sighs) 等）各家模型支持程度不一，
+        // Fish 不保证识别，直接清掉，避免被当成英文字念出来。台词里的英文照常保留。
+        const speechText = sanitizeSpeechText(text, { keepSoundTags: false, dropLatin: false });
+        if (!speechText) return null;
+        if (!hasSpeakableContent(speechText)) return null;
+        return synthesizeFishAudio(speechText, voiceConfig);
     }
 
     return null;
@@ -51,6 +111,10 @@ export async function synthesizeSpeech(
 // timeout. That froze voice/video calls at "对方正在说话..." until the user
 // toggled the mic. Abort after a ceiling so the caller can recover.
 const TTS_TIMEOUT_MS = 120_000;
+
+function delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = TTS_TIMEOUT_MS): Promise<Response> {
     const controller = new AbortController();
@@ -89,22 +153,386 @@ function normalizeMinimaxPitch(pitch: number | undefined): number {
     return Math.min(MINIMAX_PITCH_MAX, Math.max(MINIMAX_PITCH_MIN, Math.round(pitch)));
 }
 
+// ── 朗读文本清洗（只念台词） ─────────────────────────
+// 消息正文里混着渲染用的 HTML/CSS 与旁白，例如
+//   [月薪喵擦汗<span style="background: rgba(0,0,0,0.05); color: #888888; …"> (不经意秀腹肌) </span>]
+// 以前是把整段原样透传给 MiniMax，于是 style 属性里的整串 CSS 英文、以及括号里的
+// 旁白动作都被当成台词念了出来。这里在合成前统一剥离，只留下真正要说的话。
+
+/** MiniMax 官方 Sound Tag（语音世界书 §7.1）。它们是"表演指令"，绝不能当台词念，
+ *  但必须原样交给模型，模型才会把它演绎成呼吸/停顿/笑意——这正是"活人感"的来源。 */
+const MINIMAX_SOUND_TAGS = [
+    "laughs", "chuckle", "coughs", "clear-throat", "groans", "breath", "pant",
+    "inhale", "exhale", "gasp", "sniffs", "sighs", "snorts", "burps",
+    "lip-smacking", "humming", "hissing", "emm", "sneezes",
+];
+
+const MINIMAX_SOUND_TAG_RE = new RegExp(`\\(\\s*(${MINIMAX_SOUND_TAGS.join("|")})\\s*\\)`, "gi");
+
+/**
+ * 官方 Sound Tag → MiniMax 停顿标记 <#x#>（单位：秒）映射。
+ *
+ * 背景：世界书 §7.1 把 (breath)/(sighs)/(chuckle) 等定义为"表演指令"，模型本该
+ * 把它们演绎成呼吸/笑意而非字音。但实测部分账号/模型版本不再识别括号标签，会把
+ * "breath" 当英文单词念出来（用户截图：语音条 label 直接是 "(breath) 再不起床…"）。
+ * 唯一可靠的兜底是把所有括号标签换成 MiniMax 官方支持的 <#x#> 停顿标记——
+ * 既不会被念成字音，又在语义边界留下真人换气的留白，保住"活人感"。
+ *
+ * 映射原则：
+ *  - 呼吸类（breath/inhale/exhale/pant）→ 中等停顿，模拟换气
+ *  - 叹气/呻吟（sighs/groans）→ 较长停顿，带情绪拖腔
+ *  - 吸气/喷鼻（gasp/snorts）→ 短促停顿
+ *  - 笑声/清嗓/咳嗽（laughs/chuckle/coughs/clear-throat）→ 短停顿，情绪由 emotion 参数兜底
+ *  - 其余 → 短停顿或直接抹掉，绝不让标签变成字音
+ */
+const MINIMAX_SOUND_TAG_TO_PAUSE: Record<string, string> = {
+    breath: "<#0.3#>",
+    inhale: "<#0.3#>",
+    exhale: "<#0.3#>",
+    pant: "<#0.25#>",
+    gasp: "<#0.15#>",
+    sighs: "<#0.5#>",
+    sniffs: "<#0.2#>",
+    laughs: "<#0.2#>",
+    chuckle: "<#0.2#>",
+    coughs: "<#0.2#>",
+    "clear-throat": "<#0.2#>",
+    groans: "<#0.3#>",
+    snorts: "<#0.15#>",
+    burps: "<#0.2#>",
+    "lip-smacking": "<#0.1#>",
+    humming: "<#0.3#>",
+    hissing: "<#0.2#>",
+    emm: "<#0.2#>",
+    sneezes: "<#0.3#>",
+};
+
+/**
+ * 把台词里所有 MiniMax 官方 Sound Tag 替换成 <#x#> 停顿标记。
+ * 必须在 addMinimaxBreathMarks / inferMinimaxEmotion 之后、发送给 MiniMax 之前调用：
+ * 前两者依赖标签做情绪推断与补呼吸标记，这里再统一抹成停顿，避免被模型当英文念出。
+ */
+function soundTagsToPauses(text: string): string {
+    return text.replace(MINIMAX_SOUND_TAG_RE, (_, tag: string) => {
+        return MINIMAX_SOUND_TAG_TO_PAUSE[tag.toLowerCase()] || "";
+    });
+}
+
+/**
+ * 最后一道保险：中文台词里绝不允许出现任何括号。
+ *
+ * 为什么还要这一层：Sound Tag 的写法并不总能穷举——模型可能写成 (breaths)、
+ * (deep breath)、(Breathing slowly)、(sigh)… 只要漏掉一个，MiniMax 就会把那个
+ * 英文单词原样念出来（用户反复反馈的 "(breath)" 音）。与其在标签表上逐个打补丁，
+ * 不如立一条不变量：**送进 TTS 的文本里不允许有任何括号字符**。
+ *
+ * 注意这里【不】清理台词正文里的英文：用户明确要求台词里的英文照常念出来
+ * （"OK，我知道了" 里的 OK 必须念），只有括号里的内容不许念。
+ */
+function stripBracketsWithPunctuation(text: string): string {
+    if (!text) return "";
+    // 1. MiniMax 官方 Sound Tag → 中文标点（保留呼吸感但不用括号）
+    //    叹气/呻吟 → 省略号（情绪拖腔），吸气/喷鼻 → 逗号（短促停顿），
+    //    其他表演标签（breath/pant/inhale/exhale/laughs/chuckle/coughs/groans）
+    //    → 逗号（换气/短促停顿），情绪由 emotion 参数兜底。
+    let out = text.replace(MINIMAX_SOUND_TAG_RE, (_, tag: string) => {
+        const t = tag.toLowerCase();
+        if (["sighs", "groans"].includes(t)) return "……";
+        return "，";
+    });
+
+    // 2. 所有括号整块删掉（圆括号/方括号/中文方括号/书名号/花括号）
+    out = out
+        .replace(/[（(][^）)]*[）)]/g, " ")
+        .replace(/\[[^\]]*\]/g, " ")
+        .replace(/【[^】]*】/g, " ")
+        .replace(/《[^》]*》/g, " ")
+        .replace(/〈[^〉]*〉/g, " ")
+        .replace(/\{[^}]*\}/g, " ");
+
+    // 3. 兜底：任何剩余括号字符（残缺配对）全部删掉
+    out = out.replace(/[（）()【】《》〈〉\[\]{}]/g, " ");
+
+    // 4. 折叠空白 & 标点规范化（台词正文里的英文原样保留，照常念出来）
+    out = out
+        .replace(/[ \t]{2,}/g, " ")
+        .replace(/ ?\n ?/g, "\n")
+        .replace(/[ \t]+([，。！？、；：…])/g, "$1")
+        .replace(/(，\s*){2,}/g, "，")
+        .replace(/(…\s*){2,}/g, "……")
+        // 括号换来的逗号如果紧跟在句末标点后面就是多余的（"小笨蛋。，" → "小笨蛋。"）
+        .replace(/([。！？…])\s*[，、；：]+/g, "$1")
+        .replace(/[，、；：]+\s*([。！？])/g, "$1")
+        // 括号删掉后在句首/句尾留下的孤立逗号一并去掉
+        .replace(/^[，、；：\s]+/, "")
+        .replace(/[，、；：\s]+$/, "")
+        .trim();
+    return out;
+}
+
+/**
+ * 一条消息正文 → 最终要送给 MiniMax 念的文本。
+ *
+ * 单一出口，保证"语音条里存的文本"与"真正被念出来的文本"完全一致：
+ * 清洗（只留台词）→ 补呼吸停顿 → Sound Tag 转 <#x#> 停顿 → 抹掉残留英文。
+ * 调用方（语音条、通话、VN、故事、微信）都从这里取文本，避免各处各写一套。
+ */
+export function toMinimaxSpeakText(raw: string): string {
+    const speechText = sanitizeSpeechText(raw, { keepSoundTags: true, dropLatin: false });
+    if (!speechText) return "";
+    if (!hasSpeakableContent(speechText)) return "";
+    return stripBracketsWithPunctuation(addMinimaxBreathMarks(speechText));
+}
+
+/**
+ * 语音世界书 §7.2 非官方/不适配标签替换表。
+ *
+ * speech-2.8 只认官方标签，其余会被模型当普通文本念出来（世界书叫"掉格式"）。
+ * 以前这些标签连同括号一起被删掉，表演直接丢失；现在按世界书的规则换成官方组合，
+ * 既不出字音、也保住"耳语/哽咽/打哈欠"该有的呼吸与语气。
+ * 顺序无所谓：全部先替换成官方形式，随后统一交给官方标签占位符保管。
+ */
+const MINIMAX_NONOFFICIAL_TAGS: Array<[RegExp, string]> = [
+    [/\(\s*(?:whispers?|耳语|气声)\s*\)/gi, "(breath)"],
+    [/\(\s*(?:low|[，,]?\s*unhurried|急促|低沉)\s*\)/gi, "(pant) (breath)"],
+    [/\(\s*(?:crying|cries|哭泣|哭腔)\s*\)/gi, "(sniffs) (breath)"],
+    [/\(\s*(?:yawns?|哈欠)\s*\)/gi, "(sighs) (breath)"],
+    [/\(\s*(?:clears?\s*-?\s*throat|清嗓)\s*\)/gi, "(clear-throat)"],
+    [/\(\s*(?:gasps|倒吸气)\s*\)/gi, "(gasp)"],
+    [/\(\s*(?:sniffle|sniffles|吸鼻)\s*\)/gi, "(sniffs)"],
+    [/\(\s*(?:laugh|大笑)\s*\)/gi, "(laughs)"],
+    [/\(\s*(?:chuckles|轻笑)\s*\)/gi, "(chuckle)"],
+    // §7.2-04：口哨没有对应标签，直接写成文本让模型自然演绎
+    [/\(\s*whistles?\s*\)/gi, "吹了声口哨"],
+];
+
+/** 中文（含扩展区）——用来判断"这条消息是不是在用中文说话"。 */
+const HAS_CHINESE_RE = /[\u3400-\u9fff\uf900-\ufaff]/;
+
+/**
+ * 把一条消息正文清洗成"只该被念出来的内容"：
+ * 去 HTML/CSS → 去旁白（方括号/括号里的动作、表演指令）→ 去英文 → 折叠空白。
+ * options.keepSoundTags：保留 MiniMax 官方 Sound Tag（OpenAI 这类不支持标签的引擎传 false）。
+ * options.dropLatin：剔除残留英文，只念中文台词。
+ * 注意：正文完全不含中文时不删英文，否则纯英文角色会直接没声。
+ */
+export function sanitizeSpeechText(raw: string, options?: { keepSoundTags?: boolean; dropLatin?: boolean }): string {
+    if (!raw) return "";
+    const keepSoundTags = options?.keepSoundTags === true;
+    const dropLatin = options?.dropLatin === true;
+
+    let text = raw;
+
+    // 1. HTML 实体还原成字符，避免 "&amp;" 被念成 "and"
+    text = text
+        .replace(/&nbsp;/gi, " ")
+        .replace(/&amp;/gi, "&")
+        .replace(/&lt;/gi, "<")
+        .replace(/&gt;/gi, ">")
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/gi, "'");
+
+    // 2. 先把"要保留的东西"摘成占位符，免得被后面的规则误伤。
+    const kept: string[] = [];
+    const stash = (value: string): string => `\u0000${kept.push(value) - 1}\u0000`;
+    // 2a. MiniMax 停顿标记 <#0.3#> —— 长得像 HTML 标签，必须先摘出来
+    text = text.replace(/<\s*#[0-9.]+\s*#\s*>/g, stash);
+    // 2b. 官方 Sound Tag（世界书用英文半角括号写标签，如 (breath)）
+    if (keepSoundTags) {
+        // 非官方标签先按 §7.2 换成官方组合——否则它们会被模型当台词念出来。
+        for (const [pattern, replacement] of MINIMAX_NONOFFICIAL_TAGS) {
+            text = text.replace(pattern, replacement);
+        }
+        // 模型偶尔会写成全角括号（breath）——先归一成半角，否则第 4 步会把整段
+        // 括号当旁白删掉，本该演出来的呼吸/笑意就没了。
+        text = text.replace(
+            new RegExp(`（\\s*(${MINIMAX_SOUND_TAGS.join("|")})\\s*）`, "gi"),
+            (_, tag: string) => `(${tag.toLowerCase()})`,
+        );
+        text = text.replace(MINIMAX_SOUND_TAG_RE, m => stash(m.toLowerCase()));
+    }
+
+    // 3. 剥掉所有 HTML 标签 —— style 属性里的整串 CSS 英文随之消失（"大段英文"的根源）
+    text = text.replace(/<[^>]*>/g, " ");
+
+    // 4. 旁白/动作/表演指令都不是台词：方括号、中文括号、圆括号、花括号、书名号
+    text = text
+        .replace(/\[[^\]]*\]/g, " ")
+        .replace(/【[^】]*】/g, " ")
+        .replace(/（[^）]*）/g, " ")
+        .replace(/\([^)]*\)/g, " ")
+        .replace(/\{[^}]*\}/g, " ")
+        .replace(/《[^》]*》/g, " ")
+        .replace(/〈[^〉]*〉/g, " ")
+        // markdown 强调记号本身不是台词，但括号里的文字要保留：
+        // 把 **重点** 之类清成 重点，避免整段台词被误删。
+        .replace(/[*~]+/g, " ");
+
+    // 5. 清掉没能配对、残留的括号与尖括号
+    text = text.replace(/[\[\]【】（）(){}《》〈〉<>]/g, " ");
+
+    // 6. 只念中文台词：剔除残留英文（CSS 碎片、误留的非官方标签等）。
+    //    正文完全没中文时保留英文，否则纯英文角色会失声。
+    if (dropLatin && HAS_CHINESE_RE.test(text)) text = text.replace(/[A-Za-z]+/g, " ");
+
+    // 7. 去掉 emoji / 图形符号（同样不是台词）
+    text = text.replace(/[\u{1F000}-\u{1FAFF}\u{2190}-\u{21FF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE00}-\u{FE0F}\u{200D}]/gu, " ");
+
+    // 8. 折叠空白：保留段落换行，去掉多余空格
+    text = text
+        .replace(/[^\S\n]+/g, " ")
+        .replace(/ ?\n ?/g, "\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+
+    // 9. 还原第 2 步保留的标签
+    text = text.replace(/\u0000(\d+)\u0000/g, (_, i: string) => kept[Number(i)] ?? "");
+
+    // 10. 收尾：去掉中文标点前的多余空格，让断句更自然
+    text = text.replace(/[ \t]+([，。！？、；：…])/g, "$1").replace(/[ \t]{2,}/g, " ");
+    return text.trim();
+}
+
+/**
+ * 剥掉表演标记后还有可念的内容吗？
+ * 只写 (breath)/(sighs) 或 <#0.3#> 的消息是纯表演指令，不是台词——不该被朗读。
+ */
+function hasSpeakableContent(speechText: string): boolean {
+    const stripped = speechText
+        .replace(/<\s*#[0-9.]+\s*#\s*>/g, "")
+        .replace(MINIMAX_SOUND_TAG_RE, "");
+    return /[A-Za-z0-9\u3400-\u9fff\uf900-\ufaff]/.test(stripped);
+}
+
+/**
+ * 从台词里推断情绪，交给 MiniMax 的 voice_setting.emotion，让语气有起伏。
+ * 优先看模型自己按世界书写下的 Sound Tag（强信号），再用几个几乎不会误伤的关键词兜底；
+ * 都不命中就返回 null —— 不传 emotion，让模型按语义自行判断（传错情绪比不传更伤自然人声）。
+ */
+const MINIMAX_TAG_EMOTION: Array<[string, RegExp]> = [
+    // 只取语义明确的标签。叹气/鼻息在不同情绪下都会出现，不在这里强行定情绪，
+    // 免得把温柔的亲昵场景误判成"悲伤"；这类留给关键词或模型自行判断。
+    ["happy", /\((laughs|chuckle)\)/i],
+    ["sad", /\(sniffs\)/i],
+    ["surprised", /\(gasp\)/i],
+];
+
+const MINIMAX_KEYWORD_EMOTION: Array<[string, RegExp]> = [
+    // 世界书 §2.3.8：温柔/亲近 = happy + 更慢的语速、更低的音高（哄人时不能念得像播报）
+    ["gentle", /(乖|别怕|不怕|没事|我在|慢慢来|不着急|听话|哄|摸头|抱住|抱紧|轻点|轻一些)/],
+    ["happy", /(哈哈|嘿嘿|嘻嘻|开心|高兴|太好了|好耶|么么|抱抱|亲亲|喜欢|笑死)/],
+    ["sad", /(呜呜|难过|伤心|悲伤|失落|沮丧|想哭|哭了|舍不得)/],
+    ["angry", /(生气|愤怒|恼火|火大|混蛋|讨厌|烦死|凭什么|闭嘴)/],
+    ["surprised", /(震惊|惊讶|居然|竟然|天哪|天呐|不是吧|真的假的|什么鬼)/],
+    ["fearful", /(害怕|好怕|吓死|吓人|紧张|不敢)/],
+];
+
+function inferMinimaxEmotion(text: string): string | null {
+    for (const [emotion, re] of MINIMAX_TAG_EMOTION) if (re.test(text)) return emotion;
+    for (const [emotion, re] of MINIMAX_KEYWORD_EMOTION) if (re.test(text)) return emotion;
+    return null;
+}
+
+// ── 呼吸/停顿补全（世界书 §2.1 呼吸栏）────────────────
+// 角色没按世界书写呼吸标记时，MiniMax 会一字不差地匀速念完——这正是"AI 腔"最明显
+// 的地方。这里在句末标点（语义边界，绝不会切进词里）之间补一次 (breath)：
+// 真人说话本来就在这里换气，MiniMax 会把标签演绎成真的吸气声，顺带把语流切开。
+const CJK_CHAR_RE = /[\u3400-\u9fff\uf900-\ufaff]/g;
+// 文本里已经有任何一个呼吸/语气标记就不再补：角色自己演过了，再叠一次会显得喘。
+const EXISTING_TAG_RE = /\((?:laughs|chuckle|coughs|clear-throat|groans|breath|pant|inhale|exhale|gasp|sniffs|sighs|snorts|burps|lip-smacking|humming|hissing|emm|sneezes)\)/i;
+
+function countCjk(text: string): number {
+    return (text.match(CJK_CHAR_RE) || []).length;
+}
+
+/** 单条长句（中间只有逗号）在靠近句中的那处逗号后换气——世界书 BRE-05。 */
+function insertBreathAtMiddleComma(text: string): string {
+    const clauses = text.split(/(?<=[，、；])/).map(s => s.trim()).filter(Boolean);
+    if (clauses.length < 2) return text;
+    const total = countCjk(text);
+    let acc = 0;
+    let insertAt = -1;
+    let bestDiff = Infinity;
+    for (let i = 0; i < clauses.length - 1; i += 1) {
+        acc += countCjk(clauses[i]);
+        const diff = Math.abs(acc - total / 2);
+        if (diff < bestDiff) { bestDiff = diff; insertAt = i + 1; }
+    }
+    if (insertAt < 1) return text;
+    return clauses.map((clause, i) => (i === insertAt ? `(breath) ${clause}` : clause)).join("");
+}
+
+export function addMinimaxBreathMarks(text: string): string {
+    if (!text || EXISTING_TAG_RE.test(text)) return text;
+    const cjkCount = countCjk(text);
+    // 短句本来就是一口气说完的，硬加换气反而假（§2.1 注意：每 100 字 3-4 处为上限）。
+    if (cjkCount < 16) return text;
+
+    const sentences = text.split(/(?<=[。！？!?…])/).map(s => s.trim()).filter(Boolean);
+    if (sentences.length < 2) {
+        return cjkCount >= 30 ? insertBreathAtMiddleComma(text) : text;
+    }
+
+    let budget = Math.max(1, Math.min(4, Math.round(cjkCount / 100 * 3)));
+    const out: string[] = [sentences[0]];
+    for (let i = 1; i < sentences.length; i += 1) {
+        const sentence = sentences[i];
+        // 只在够长的句子前换气；短句连读才像人在说话。
+        if (budget > 0 && countCjk(sentence) >= 10) {
+            out.push(`(breath) ${sentence}`);
+            budget -= 1;
+        } else {
+            out.push(sentence);
+        }
+    }
+    return out.join("");
+}
+
+// 世界书 §2.3 / §三：不同情绪的音高、语速本来就不同——生气是前慢后快、难过是
+// 拖腔下沉、惊讶是骤升。只给一个 emotion 参数，音色对了但语速节奏还是匀速念稿。
+// 这里按情绪表带一点 speed/pitch 偏移，只在用户没手工调过时生效（用户调过的优先）。
+const MINIMAX_EMOTION_TUNING: Record<string, { speed: number; pitch: number }> = {
+    gentle: { speed: 0.9, pitch: -1 },
+    happy: { speed: 1.05, pitch: 1 },
+    sad: { speed: 0.9, pitch: -1 },
+    angry: { speed: 0.95, pitch: -1 },
+    surprised: { speed: 1.0, pitch: 2 },
+    fearful: { speed: 1.05, pitch: 1 },
+    disgusted: { speed: 0.92, pitch: -1 },
+    calm: { speed: 0.95, pitch: 0 },
+};
+
 async function synthesizeMinimax(text: string, config: VoiceApiConfig, emotion?: string): Promise<Blob | null> {
     if (!config.apiKey) throw new Error("Minimax API Key 未配置");
+
+    // 终极保险：送进 MiniMax 的 text 绝不允许含任何括号字符。
+    // 任何绕过清洗链的新入口都会立刻在这里暴露并阻断。
+    // 台词正文里的英文不拦——用户要求英文照常念出来，只有括号内不许念。
+    if (/[（）()【】《》〈〉\[\]{}]/.test(text)) {
+        console.error("[TTS 保险阻断] 送进 MiniMax 的文本含未清洗的括号，已拒绝发送：", text.slice(0, 200));
+        return null;
+    }
+
+    const normalizedEmotion = emotion?.trim().toLowerCase();
+    const tuning = normalizedEmotion ? MINIMAX_EMOTION_TUNING[normalizedEmotion] : undefined;
+    // 世界书 §2.3.8 的"温柔"没有对应 emotion 取值：拿到 happy 的柔和基线，
+    // 再用 tuning 把语速压慢、音高压低，避免把哄人的话念成播报腔。
+    const sentEmotion = normalizedEmotion === "gentle" ? "happy" : normalizedEmotion;
+    const useEmotion = !!sentEmotion && MINIMAX_EMOTIONS.has(sentEmotion);
 
     const baseUrl = (config.baseUrl || "https://api.minimaxi.com/v1").replace(/\/$/, "");
     const voiceSetting: Record<string, unknown> = {
         voice_id: config.defaultVoice || "male-qn-qingse",
-        speed: normalizeMinimaxSpeed(config.speechSpeed),
+        speed: normalizeMinimaxSpeed(
+            typeof config.speechSpeed === "number" ? config.speechSpeed : tuning?.speed,
+        ),
         vol: 1.0,
-        pitch: normalizeMinimaxPitch(config.speechPitch),
+        pitch: normalizeMinimaxPitch(
+            typeof config.speechPitch === "number" ? config.speechPitch : tuning?.pitch,
+        ),
     };
-    const normalizedEmotion = emotion?.trim().toLowerCase();
-    if (normalizedEmotion && MINIMAX_EMOTIONS.has(normalizedEmotion)) {
-        voiceSetting.emotion = normalizedEmotion;
-    }
 
-    const response = await fetchWithTimeout(`${baseUrl}/t2a_v2`, {
+    const request = (withEmotion: boolean) => fetchWithTimeout(`${baseUrl}/t2a_v2`, {
         method: "POST",
         headers: {
             Authorization: `Bearer ${config.apiKey}`,
@@ -115,7 +543,7 @@ async function synthesizeMinimax(text: string, config: VoiceApiConfig, emotion?:
             text,
             stream: false,
             ...(config.languageBoost ? { language_boost: config.languageBoost } : {}),
-            voice_setting: voiceSetting,
+            voice_setting: withEmotion && useEmotion ? { ...voiceSetting, emotion: sentEmotion } : voiceSetting,
             // 44100/256k 是 Minimax 支持的最高档;之前 32000/128k 会把 hd 模型
             // 的输出压闷(用户反馈"声音糊"),各模型均支持该档位。
             audio_setting: {
@@ -127,22 +555,60 @@ async function synthesizeMinimax(text: string, config: VoiceApiConfig, emotion?:
         }),
     });
 
+    // 网络抖动（DNS/连接被重置）会让 fetch 直接抛 TypeError。语音是刚需，
+    // 一次抖动不该让整条语音变成「合成失败·点击重试」，先退避重试一次。
+    const requestWithRetry = async (): Promise<Response> => {
+        try {
+            return await request(true);
+        } catch (error) {
+            if (!(error instanceof TypeError)) throw error;
+            await delay(800);
+            return request(false);
+        }
+    };
+
+    let response = await requestWithRetry();
+    // 情绪参数在个别模型/账号上不被接受。语音是刚需，不能因为一个可选的
+    // 情绪参数被拒就整条失声——退一步用原声再发一次。
+    if (!response.ok && useEmotion) response = await request(false);
+
+    // 429/5xx 是临时性的（限流/服务端抖动）：稍等再试一次，不直接判失败。
+    if (response.status === 429 || response.status >= 500) {
+        await delay(900);
+        response = await request(false);
+    }
+
     if (!response.ok) {
         const err = await response.json().catch(() => ({}));
         throw new Error(err.base_resp?.status_msg || `Minimax API 请求失败 (${response.status})`);
     }
 
-    const data = await response.json();
+    let data = await response.json();
+    const statusCode = Number(data?.base_resp?.status_code ?? 0);
+    // MiniMax 有时 HTTP 200 但 base_resp 里是限流错误（1002）：等一下再请求一次，
+    // 仍然失败才把服务端原文交给界面，而不是只显示笼统的「合成失败」。
+    if (!data.data?.audio && statusCode === 1002) {
+        await delay(1200);
+        const retried = await request(false);
+        if (retried.ok) data = await retried.json();
+    }
+
     if (data.data?.audio) {
         const hexString: string = data.data.audio;
-        const bytes = new Uint8Array(hexString.length / 2);
-        for (let i = 0; i < hexString.length; i += 2) {
-            bytes[i / 2] = parseInt(hexString.substring(i, i + 2), 16);
+        if (hexString.length < 2) throw new Error("Minimax 返回的音频数据为空");
+        const bytes = new Uint8Array(Math.floor(hexString.length / 2));
+        for (let i = 0; i < bytes.length; i += 1) {
+            bytes[i] = parseInt(hexString.substring(i * 2, i * 2 + 2), 16);
         }
         return new Blob([bytes], { type: "audio/mpeg" });
     }
 
-    throw new Error(data.base_resp?.status_msg || "Minimax 未返回音频数据");
+    const serverMessage = data.base_resp?.status_msg;
+    throw new Error(
+        statusCode !== 0
+            ? `Minimax(${statusCode})：${serverMessage || "合成失败"}`
+            : "Minimax 未返回音频数据",
+    );
 }
 
 // ── OpenAI TTS ──────────────────────────────────────
@@ -177,6 +643,36 @@ async function synthesizeOpenAI(text: string, config: VoiceApiConfig): Promise<B
     return new Blob([await blob.arrayBuffer()], { type: "audio/mpeg" });
 }
 
+// ── Fish Audio TTS ──────────────────────────────────
+
+async function synthesizeFishAudio(text: string, config: VoiceApiConfig): Promise<Blob | null> {
+    if (!config.apiKey) throw new Error("Fish Audio API Key 未配置");
+
+    // Fish Audio 没开 CORS，浏览器直连会被预检拦掉，统一走同源的服务端中转。
+    const response = await fetchWithTimeout("/api/voice/fish-tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            apiKey: config.apiKey,
+            baseUrl: config.baseUrl,
+            model: config.model,
+            voiceId: config.defaultVoice,
+            text,
+            format: "mp3",
+            speed: config.speechSpeed,
+        }),
+    });
+
+    if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.message || `Fish Audio TTS 请求失败 (${response.status})`);
+    }
+
+    const blob = await response.blob();
+    if (!blob.size) throw new Error("Fish Audio 未返回音频数据");
+    return new Blob([await blob.arrayBuffer()], { type: "audio/mpeg" });
+}
+
 // ── iOS audio playback that coexists with speech recognition ──────────
 // On iOS Safari, playing TTS through an <audio> element keeps the system audio
 // session in "playback" mode, which steals the mic from webkitSpeechRecognition
@@ -185,8 +681,6 @@ async function synthesizeOpenAI(text: string, config: VoiceApiConfig): Promise<B
 // AudioContext and explicitly suspend() it after each clip so iOS hands the
 // audio session back to the microphone. A shared <audio> element is kept as a
 // fallback for browsers without AudioContext.
-
-type AudioContextWindow = typeof globalThis & { webkitAudioContext?: typeof AudioContext };
 
 let _audioCtx: AudioContext | null = null;
 let _sharedAudio: HTMLAudioElement | null = null;
@@ -236,8 +730,7 @@ export function setCallAudioSessionActive(active: boolean): void {
 
 function getAudioContext(): AudioContext | null {
     if (typeof window === "undefined") return null;
-    const audioWindow = window as unknown as AudioContextWindow;
-    const Ctor = audioWindow.AudioContext || audioWindow.webkitAudioContext;
+    const Ctor = (window as any).AudioContext || (window as any).webkitAudioContext;
     if (!Ctor) return null;
     if (!_audioCtx) {
         // 不要钉 sampleRate:部分 iOS 版本上非硬件采样率的 ctx 会"时钟照走、

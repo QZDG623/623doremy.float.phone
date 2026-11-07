@@ -35,15 +35,18 @@ import android.content.ClipData
 import androidx.core.app.NotificationCompat
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONObject
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import android.webkit.CookieManager
 import android.webkit.DownloadListener
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
@@ -160,6 +163,12 @@ class MainActivity : AppCompatActivity() {
     private var webVideoCustomView: View? = null
     private var webVideoCustomViewCallback: WebChromeClient.CustomViewCallback? = null
 
+    /** 渲染进程已经崩溃、WebView 已被我们自己销毁（onDestroy 不能再 destroy 第二次）。 */
+    private var rendererCrashed = false
+
+    /** 正在问网页「这一下返回你处理吗」，避免连按两次弹出两个回调。 */
+    private var backHandling = false
+
     /** 系统状态栏实际高度（CSS px，即物理像素 / density），实时更新。 */
     @Volatile
     private var statusBarHeightCssPx: Int = 0
@@ -184,6 +193,9 @@ class MainActivity : AppCompatActivity() {
 
     /** 健康桥：让角色知道用户昨晚睡了多久（只读睡眠、只回时长，边界见 HealthBridge）。 */
     private val healthBridge by lazy { HealthBridge(this) }
+
+    /** 应用守卫：关注应用拉回小手机、睡眠时段锁应用（配置由网页写入，见 AppGuard）。 */
+    private val appGuard by lazy { AppGuard(this) }
 
     /**
      * 睡眠读取权限的申请结果回调。
@@ -1131,6 +1143,8 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
         // 步数传感器是异步的（没有同步取值接口），必须提前挂上才有值可读。
         // 这里只是「挂监听」，不申请权限；没授权时 attachStepSensor 内部会直接返回。
         PerceptionBridge.attachStepSensor(this)
+        // 加速度计（零权限）用来判断「躺/坐站」，进程活着就能读。
+        PerceptionBridge.attachMotionSensor(this)
         // 登记给 ShellBus：浮窗服务/无障碍服务要把事件投回页面，需要这个引用。
         // WebView 只能在主线程访问，投递时由 ShellBus 统一 post 到主线程。
         ShellBus.webView = webView
@@ -1669,9 +1683,45 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
         @JavascriptInterface
         fun getAppLabel(packageName: String): String = perception.appLabel(packageName)
 
-        /** 本机支持哪些感知能力，给「感知 → 诊断」面板用。 */
+        /**
+         * 本机支持哪些感知能力，给「感知 → 诊断」面板用。
+         *
+         * 位置的实际授权状态在 LocationBridge：这里必须合并进来，否则网页读
+         * native.locationGranted 永远是 undefined，界面上会一直显示「需要位置权限」——
+         * 即使系统权限早就给了（实测反馈的正是这种「权限都有、却只有电量有反应」）。
+         */
         @JavascriptInterface
-        fun getPerceptionCapabilities(): String = perception.capabilitiesJson()
+        fun getPerceptionCapabilities(): String {
+            val base = runCatching { JSONObject(perception.capabilitiesJson()) }.getOrElse { JSONObject() }
+            val location = runCatching { JSONObject(locationBridge.capabilitiesJson()) }.getOrNull()
+            if (location != null) {
+                for (key in listOf("location", "locationGranted", "locationFineGranted", "locationServiceOn", "locationCached")) {
+                    if (location.has(key)) base.put(key, location.get(key))
+                }
+            }
+            base.put("appGuard", true)
+            return base.toString()
+        }
+
+        /**
+         * 写入应用守卫配置（关注应用 / 睡眠锁）。
+         * 配置落在 SharedPreferences，进程重启、网页没开时照样生效。
+         */
+        @JavascriptInterface
+        fun setAppGuardConfig(json: String) {
+            appGuard.saveConfig(json)
+        }
+
+        /** 读当前守卫配置（排障用）。 */
+        @JavascriptInterface
+        fun getAppGuardConfig(): String = appGuard.readConfig()
+
+        /** 把小手机自己拉到前台（应用守卫与睡眠遮罩的「回小手机」都走这条）。 */
+        @JavascriptInterface
+        fun bringToFront(): Boolean {
+            runOnUiThread { appGuard.bringToFront() }
+            return true
+        }
 
         /**
          * 读今天各应用的使用时长（JSON 数组，按时长降序）。
@@ -1726,6 +1776,28 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
         /** 原生无障碍服务是否支持独立后台停留计时（供网页避免重复触发）。 */
         @JavascriptInterface
         fun supportsBackgroundDwellTracking(): Boolean = true
+
+        /** 屏幕使用总时长 + 各应用时长（{available,screenMinutes,apps}）。 */
+        @JavascriptInterface
+        fun readScreenUsage(maxEntries: Int): String = perception.screenUsageJson(maxEntries)
+
+        /** 此刻设备动作：{activity: walk/still/lying/unknown, posture, stepsDelta, perMinute}。 */
+        @JavascriptInterface
+        fun getMotionSnapshot(): String = perception.motionJson().toString()
+
+        /**
+         * 测一次环境噪音：{available,db,dbfs,level}。
+         * 需要录音权限；采样 0.4 秒，不保留音频。
+         */
+        @JavascriptInterface
+        fun readNoiseDb(): String = perception.noiseJson().toString()
+
+        /**
+         * 当前在听什么：{available,playing,app,title,artist}。
+         * 需要「通知使用权」；未授权时回 available=false + 原因。
+         */
+        @JavascriptInterface
+        fun readNowPlaying(): String = perception.nowPlayingJson().toString()
 
         /** 活动识别权限是否已授予（步数感知的前提）。 */
         @JavascriptInterface
@@ -2227,6 +2299,51 @@ private fun deleteCachedSharedVideoInternal(cacheId: String): Boolean {
         /** 截屏桥的内部状态快照（诊断面板用，不含任何画面内容）。 */
         @JavascriptInterface
         fun getScreenshotDiagnostics(): String = ScreenshotBridge.diagnosticsJson()
+
+        // ── 读整屏文字 / 字幕气泡 / 自主看屏节拍 ────────────
+
+        /**
+         * 读当前屏幕上的文字（无障碍遍历，不截图）。
+         * 返回 {available, text, package}；错误时 {available:false, reason}。
+         */
+        @JavascriptInterface
+        fun readScreenText(): String = ScreenshotBridge.readScreenText()
+
+        /** 显示一条字幕气泡；durationMs<=0 表示常驻。 */
+        @JavascriptInterface
+        fun showSubtitle(text: String, durationMs: Int): Boolean =
+            ScreenshotBridge.showSubtitle(text, durationMs)
+
+        /** 收起字幕气泡。 */
+        @JavascriptInterface
+        fun hideSubtitle() {
+            ScreenshotBridge.hideSubtitle()
+        }
+
+        /**
+         * 让悬浮球进入/退出「呼吸」状态（透明度慢慢变淡再变回原色）。
+         * 网页在角色看屏思考、逐句说话期间调用，用来告诉用户「它正在看」。
+         */
+        @JavascriptInterface
+        fun setScreenshotBallThinking(thinking: Boolean) {
+            ScreenshotBallService.setThinking(thinking)
+        }
+
+        /**
+         * 开始自主看屏节拍：每 seconds 秒往网页推一条 screen-tick 事件。
+         * 网页在后台时 JS 定时器会被冻结，所以节拍由原生托管；要不要生成、
+         * 几轮停由网页决定。seconds<=0 等价于停止。
+         */
+        @JavascriptInterface
+        fun startScreenTicker(seconds: Int) {
+            ScreenshotBridge.startTicker(seconds)
+        }
+
+        /** 停止自主看屏节拍。 */
+        @JavascriptInterface
+        fun stopScreenTicker() {
+            ScreenshotBridge.stopTicker()
+        }
 
         /** 查岗浮层的内部状态快照（诊断面板用）。 */
         @JavascriptInterface

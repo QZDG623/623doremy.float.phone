@@ -59,6 +59,30 @@ function sanitizeOverrides(raw: unknown): AppUsageOverride[] {
   return list;
 }
 
+/** 清洗「关注应用 / 锁定应用」这类关键词列表。空项丢掉，最多 20 条。 */
+function sanitizeKeywords(raw: unknown, max = 20): string[] {
+  if (!Array.isArray(raw)) return [];
+  const list: string[] = [];
+  for (const item of raw) {
+    const text = String(item ?? "").trim();
+    if (!text) continue;
+    list.push(text.slice(0, 40));
+    if (list.length >= max) break;
+  }
+  return list;
+}
+
+/** 清洗 HH:MM 时间。不合法时退回 fallback（绝不把坏值喂给原生）。 */
+function sanitizeClock(raw: unknown, fallback: string): string {
+  const text = String(raw ?? "").trim();
+  const match = /^(\d{1,2}):(\d{2})$/.exec(text);
+  if (!match) return fallback;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return fallback;
+  return `${String(hour).padStart(2, "0")}:${match[2]}`;
+}
+
 /** 读配置。逐项做范围钳制，避免手改存储写出离谱的值。 */
 export function loadPerceptionConfig(): PerceptionConfig {
   try {
@@ -87,6 +111,27 @@ export function loadPerceptionConfig(): PerceptionConfig {
       injectStatus: parsed.injectStatus === true,
       queryCooldownMinutes: clamp(parsed.queryCooldownMinutes, PERCEPTION_LIMITS.queryCooldownMinutes.min, PERCEPTION_LIMITS.queryCooldownMinutes.max, PERCEPTION_DEFAULTS.queryCooldownMinutes),
       cloudSyncEnabled: parsed.cloudSyncEnabled === true,
+      appOpenWatchList: sanitizeKeywords(parsed.appOpenWatchList),
+      appOpenReturnToFloat: parsed.appOpenReturnToFloat !== false,
+      bedtimeHour: clamp(parsed.bedtimeHour, PERCEPTION_LIMITS.bedtimeHour.min, PERCEPTION_LIMITS.bedtimeHour.max, PERCEPTION_DEFAULTS.bedtimeHour),
+      bedtimeMinute: clamp(parsed.bedtimeMinute, PERCEPTION_LIMITS.bedtimeMinute.min, PERCEPTION_LIMITS.bedtimeMinute.max, PERCEPTION_DEFAULTS.bedtimeMinute),
+      sleepLockEnabled: parsed.sleepLockEnabled === true,
+      sleepLockStart: sanitizeClock(parsed.sleepLockStart, PERCEPTION_DEFAULTS.sleepLockStart),
+      sleepLockEnd: sanitizeClock(parsed.sleepLockEnd, PERCEPTION_DEFAULTS.sleepLockEnd),
+      sleepLockApps: sanitizeKeywords(parsed.sleepLockApps),
+      sleepLockMessage: typeof parsed.sleepLockMessage === "string" && parsed.sleepLockMessage.trim()
+        ? parsed.sleepLockMessage.trim().slice(0, 80)
+        : PERCEPTION_DEFAULTS.sleepLockMessage,
+      // 「用太久强制拦一下」四项。
+      // overuseAction 是联合类型，只要不是 "lock" 就退回 "return"——
+      // 存储被手改成别的词时不能让原生读到不认识的动作。
+      overuseMinutes: clamp(parsed.overuseMinutes, PERCEPTION_LIMITS.overuseMinutes.min, PERCEPTION_LIMITS.overuseMinutes.max, PERCEPTION_DEFAULTS.overuseMinutes),
+      overuseAction: parsed.overuseAction === "lock" ? "lock" : "return",
+      overuseApps: sanitizeKeywords(parsed.overuseApps),
+      overuseLockApps: sanitizeKeywords(parsed.overuseLockApps),
+      overuseMessage: typeof parsed.overuseMessage === "string" && parsed.overuseMessage.trim()
+        ? parsed.overuseMessage.trim().slice(0, 80)
+        : PERCEPTION_DEFAULTS.overuseMessage,
     };
   } catch {
     return { ...PERCEPTION_DEFAULTS };
@@ -195,6 +240,15 @@ export type PerceptionRuntimeState = {
   sitSteps: number;
   /** 本段久坐是否已上报。起身走动后重置，所以每段只报一次。 */
   sitReported: boolean;
+  /** 上一次已报「打开应用」的包名与时刻，用于短冷却（避免同一应用反复弹）。 */
+  lastWatchedOpenPkg: string;
+  lastWatchedOpenAt: number;
+  /** 上次设备动作（walk / still / lying），空串 = 还没建立基准。状态变了才发信号。 */
+  lastMotionActivity: string;
+  /** 上次测得的环境噪音（分贝），-1 = 没有基准。用于「由安静变吵」只报一次。 */
+  lastNoiseDb: number;
+  /** 上次「在听」的标识（App + 标题）；空串 = 当时没在听。换歌才算变化。 */
+  lastNowPlayingKey: string;
 };
 
 const EMPTY_STATE: PerceptionRuntimeState = {
@@ -222,6 +276,11 @@ const EMPTY_STATE: PerceptionRuntimeState = {
   lastLon: Number.NaN,
   lastPlace: "",
   lastSleepEndAt: 0,
+  lastWatchedOpenPkg: "",
+  lastWatchedOpenAt: 0,
+  lastMotionActivity: "",
+  lastNoiseDb: -1,
+  lastNowPlayingKey: "",
 };
 
 export function loadPerceptionState(): PerceptionRuntimeState {
@@ -276,6 +335,12 @@ const EMPTY_STATUS: PerceptionStatusSnapshot = {
   // 旧缓存里没有这个字段（这次才加），合并后必须还是个数组——
   // 否则 describeTopUsage 遍历时会在 undefined 上炸。
   appUsage: [],
+  // 同理：旧缓存没有这四项，合并后必须是「读不到」的哨兵值，
+  // 不能让 undefined 一路漏进文案里变成「undefined 分贝」。
+  motion: null,
+  noiseDb: -1,
+  nowPlaying: null,
+  screenMinutes: -1,
 };
 
 /** 读最近一次采样的设备状态。从未采样过时 at 为空串。 */

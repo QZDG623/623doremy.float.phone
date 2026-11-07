@@ -73,14 +73,14 @@ import { findEnabledToolForSchema, getEnabledTools, type EnabledTool } from "./t
 import { formatToolsForPrompt, formatToolSchema } from "./tool-prompt";
 import { parseToolCalls, parseToolFetches, executeToolCalls, formatToolResults } from "./tool-executor";
 import type { ToolCall, ToolResult } from "./tool-executor";
-import { getCustomStickerNames, getCustomStickerExample } from "./custom-sticker-storage";
+import { getStickerPromptNames, getStickerPromptExample, isKnownStickerLabel } from "./sticker-data";
 import { formatCustomAppChatDirectivesForPrompt } from "./custom-app-chat-directives";
 import { loadAllTracks } from "./music-storage";
 import { getActiveAppTags } from "./content-tag-utils";
 import { isNeteaseConfigured, getUserPlaylists, getPlaylistTracks, checkLoginStatus, loadMusicApiConfig } from "./music-service";
 import { buildCalendarScheduleMarker, getCurrentCalendarScheduleForPrompt } from "./calendar-storage";
 import { getWeekStartIso } from "./calendar-utils";
-import { buildCharacterTimeContext } from "./character-time";
+import { buildCharacterTimeContext, buildIdleGapContext } from "./character-time";
 import { getPromptTimestampOptionsForTimeContext } from "./prompt-time";
 import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 import { pushApiLog } from "./api-log-store";
@@ -1999,6 +1999,14 @@ export async function buildChatPromptMessages(
         )
         : "";
 
+    // 让角色感知用户离开/沉默了多久，避免自行编造这段时间发生了什么
+    const lastUserMessageAt = [...promptHistory].reverse()
+        .find(m => m.role === "user" && !m.isRetracted)?.createdAt;
+    const idleGapContext = buildIdleGapContext(lastUserMessageAt, now);
+    const timeContextWithIdle = idleGapContext
+        ? { ...promptTimeContext, timeContext: `${promptTimeContext.timeContext}\n${idleGapContext}` }
+        : promptTimeContext;
+
     const llmMessages = assemblePromptPayload({
         character,
         history: promptHistory,
@@ -2022,12 +2030,14 @@ export async function buildChatPromptMessages(
         activateAllWorldBooks: options?.activateAllWorldBooks,
         recentBlocks,
         unifiedRecentItems,
-        customStickerNames: getCustomStickerNames(character.id),
-        customStickerExample: getCustomStickerExample(character.id),
+        customStickerNames: getStickerPromptNames(character.id),
+        customStickerExample: getStickerPromptExample(character.id),
+        // 已删除/加载不到的表情不再出现在历史里，避免模型继续照抄旧表情名发文字
+        stickerLabelAllowed: (label: string) => isKnownStickerLabel(label, [character.id]),
         musicLocal,
         musicCloud,
         musicOnlineHint,
-        timeContext: promptTimeContext,
+        timeContext: timeContextWithIdle,
         promptTimestampOptions,
         enableVision: config.enableImageRecognition,
         timeAware: loadChatAppSettings().timeAware,
@@ -2064,7 +2074,7 @@ export async function buildChatPromptMessages(
         llmMessages.push({ role: "system", content: IMAGE_CHARACTER_NAMING_RULE });
     }
 
-    const avatarChangeIntent = !session.isGroup
+    const avatarChangeIntent = !session.isGroup && session.allowCharacterAvatarFromChat !== false
         ? findUserAvatarChangeIntent(historyForPrompt, session.id, character.id)
         : null;
     // 当前状态用一条直白提示兜底；具体拉黑/解除事件已写入私聊短期记忆。
@@ -2084,7 +2094,20 @@ export async function buildChatPromptMessages(
                 content: [
                     meetingInviteConfig.contract.trim() || "你可以根据当前对话语境，自主决定是否邀请用户线下见面。不要机械邀请，也不要频繁使用。",
                     "只有当你确实想见面时，才把契约要求的字段完整输出，并用 [邀请见面] 与 [/邀请见面] 包住整个字段区块。",
+                    "【见面信号】当对话出现“想见你 / 我去找你 / 在你楼下 / 来接你 / 一起吃饭散步 / 今晚见面 / 给你准备了惊喜”等线下见面信号时，本轮必须主动发一张邀请卡片，不要只口头说想见面。",
                     "字段内容会被界面按用户自定义 HTML 渲染成邀请卡片；包裹标签和字段不会显示成普通聊天文字。不要解释标签，每轮最多输出一张邀请卡片。",
+                ].join("\n"),
+            });
+        }
+
+        if (session.allowForcedOfflineStory !== false) {
+            llmMessages.push({
+                role: "system",
+                content: [
+                    "当前会话允许你强制开启线下剧情：当你非常渴望见面、准备惊喜或主动推进见面时，可以直接进入见面剧情。",
+                    "需要强制进入时，在自然回复末尾另起一行输出且只输出一次：[开启线下剧情:标题]。标题不超过20个字，用来命名这次见面的分线。",
+                    "系统会自动创建一条继承当前私聊记忆的分线并带你进入剧情；控制标记不会显示给用户，不要解释它，每轮最多一次。",
+                    "如果只是想先邀约，仍优先使用见面邀请卡片；用户已同意见面或你们已经确定见面时，直接使用上面的控制标记开启剧情。",
                 ].join("\n"),
             });
         }
@@ -2107,7 +2130,7 @@ export async function buildChatPromptMessages(
             role: "system",
             content: [
                 "用户在本轮发送了图片，并表达或暗示希望你把它换成自己的头像。",
-                "请结合你的人设与关系自主决定是否更换，不要机械接受。",
+                "用户已经明确希望你把这张图片用作头像时，默认采用；只有你确实强烈抗拒时才拒绝，不要含糊其辞。",
                 "如果愿意采用，必须在本次自然回复的末尾输出且只输出一次控制标记：[接受头像推荐]。",
                 "如果不愿采用，必须在回复末尾输出：[拒绝头像推荐]。",
                 "控制标记不会展示给用户；不要解释标记，也不要把它写进代码块。",

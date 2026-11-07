@@ -14,7 +14,7 @@
 // 直接渲染内容，不套 PageShell、不收 onBack。
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { Camera, CircleDot, Loader2, ShieldCheck, Smartphone, Trash2 } from "lucide-react";
+import { Camera, CircleDot, Eye, Loader2, MessagesSquare, ShieldCheck, Smartphone, Trash2 } from "lucide-react";
 
 import { Toggle } from "@/components/ui/form";
 import { loadCharacters } from "@/lib/character-storage";
@@ -31,11 +31,15 @@ import {
   loadScreenshotRecords,
   prepareScreenshotBall,
   readBallHasImage,
+  readScreenText,
   readScreenshotCapabilities,
   saveScreenshotConfig,
   setScreenshotBallStyle,
+  showSubtitle,
   stopScreenshotBall,
   supportsBallStyle,
+  supportsScreenText,
+  supportsScreenTicker,
   syncScreenshotShareTargets,
   type ScreenshotConfig,
   type ScreenshotRecord,
@@ -180,6 +184,8 @@ export function ScreenshotSettings({ onNotice }: { onNotice?: (msg: string) => v
   const supported = caps.supported === true;
   const accessibilityOn = caps.accessibilityOn === true;
   const ready = supported && accessibilityOn && bridgeOk;
+  const screenTextCap = caps.screenText === true;
+  const subtitleCap = caps.subtitle === true;
 
   const update = useCallback((patch: Partial<ScreenshotConfig>) => {
     const next = { ...loadScreenshotConfig(), ...patch };
@@ -263,6 +269,62 @@ export function ScreenshotSettings({ onNotice }: { onNotice?: (msg: string) => v
     syncScreenshotShareTargets();
     onNotice?.("悬浮球已开启。轻点它截屏，拖到边缘会自动吸附");
   }, [update, inShell, ready, onNotice]);
+
+  /**
+   * 开关自主回复。
+   *
+   * 三道前置必须当场说清：总开关、原生节拍（新壳才有）、无障碍读屏。
+   * 少了任何一项，用户打开后只会得到「什么都没有发生」，比直接提示难查得多。
+   */
+  const toggleAutoComment = useCallback((on: boolean) => {
+    if (on) {
+      if (!config.enabled) {
+        onNotice?.("先把上面的「允许截屏」打开，自主回复才有屏幕可看");
+        return;
+      }
+      if (!inShell || !supportsScreenTicker()) {
+        onNotice?.("当前 App 版本还不支持自主回复，需要更新安卓壳");
+        return;
+      }
+      if (!accessibilityOn) {
+        onNotice?.("自主回复要靠无障碍读屏，请先开启无障碍服务");
+      }
+    }
+    update({ autoCommentEnabled: on });
+  }, [config.enabled, inShell, accessibilityOn, update, onNotice]);
+
+  /** 试读一次当前屏幕：让用户亲眼看到「它到底读到了什么」，而不是凭信任。 */
+  const doTestScreenText = useCallback(() => {
+    if (!supportsScreenText()) {
+      onNotice?.("当前 App 版本还不支持读屏，需要更新安卓壳");
+      return;
+    }
+    const screen = readScreenText();
+    if (!screen) {
+      onNotice?.("没读到文字。确认已开启无障碍，并且当前屏幕上确实有可读的文字");
+      return;
+    }
+    const preview = screen.text.replace(/\s+/g, " ").slice(0, 60);
+    onNotice?.(`读到 ${screen.text.length} 字：${preview}${screen.text.length > 60 ? "…" : ""}`);
+  }, [onNotice]);
+
+  /** 试弹一条字幕气泡（5 秒后自动收）。 */
+  const doTestSubtitle = useCallback(() => {
+    if (!inShell) {
+      onNotice?.("字幕气泡只在安卓壳里显示");
+      return;
+    }
+    if (!accessibilityOn) {
+      onNotice?.("字幕气泡需要无障碍服务，请先开启");
+      return;
+    }
+    if (!subtitleCap) {
+      onNotice?.("当前 App 版本还不支持字幕气泡，需要更新安卓壳");
+      return;
+    }
+    showSubtitle("这是一条字幕气泡：角色说话时可以这样浮在屏幕上方", 5000);
+    onNotice?.("已弹出一条字幕气泡（5 秒后自动收起）");
+  }, [inShell, accessibilityOn, subtitleCap, onNotice]);
 
   /**
    * 改「默认接收角色」。
@@ -708,6 +770,127 @@ export function ScreenshotSettings({ onNotice }: { onNotice?: (msg: string) => v
                 </button>
               )}
             </div>
+          </div>
+        </div>
+
+        {/* 读屏与自主回复：截屏之外的「持续看一眼」 */}
+        <div>
+          <div className="settings-menu-section-title">读屏与自主回复</div>
+          <div className="menu-group" style={{ marginTop: 10 }}>
+            <div className="menu-item" style={{ cursor: "default" }}>
+              <div className="menu-icon" style={{ background: "color-mix(in srgb, var(--per-accent, #6f5bd6) 14%, transparent)" }}>
+                <Eye size={17} strokeWidth={1.8} />
+              </div>
+              <div className="menu-label-group">
+                <span className="menu-label">允许读整屏文字</span>
+                <span className="menu-desc">
+                  {accessibilityOn
+                    ? "读的是屏幕上的文字（比截图更准、也更省额度）。只在当轮生成用，不落库、不上传"
+                    : "需要无障碍服务才能读屏。没开之前这一项不会生效"}
+                </span>
+              </div>
+              {!accessibilityOn ? (
+                <button
+                  type="button"
+                  className="ui-btn ui-btn-outline"
+                  onClick={() => {
+                    openAccessibilitySettings();
+                    onNotice?.("在系统页面里找到「小手机」并开启无障碍，回来即可生效");
+                  }}
+                >
+                  去开启
+                </button>
+              ) : (
+                <Toggle
+                  checked={config.screenTextEnabled !== false}
+                  onChange={(v: boolean) => update({ screenTextEnabled: v })}
+                />
+              )}
+            </div>
+
+            <div className="menu-item" style={{ cursor: "default" }}>
+              <div className="menu-icon" style={{ background: "color-mix(in srgb, var(--per-accent, #6f5bd6) 14%, transparent)" }}>
+                <MessagesSquare size={17} strokeWidth={1.8} />
+              </div>
+              <div className="menu-label-group">
+                <span className="menu-label">自主回复（主动看屏说一句）</span>
+                <span className="menu-desc">
+                  默认关闭。开启后角色隔一段时间自己看一眼屏幕、主动说一句，会消耗模型额度；
+                  屏幕没变化时不会重复说
+                </span>
+              </div>
+              <Toggle checked={config.autoCommentEnabled === true} onChange={toggleAutoComment} />
+            </div>
+          </div>
+
+          {config.autoCommentEnabled && (
+            <div className="menu-group" style={{ marginTop: 10 }}>
+              <div className="menu-item" style={{ cursor: "default", alignItems: "flex-start" }}>
+                <div className="menu-label-group">
+                  <span className="menu-label">看屏间隔</span>
+                  <span className="menu-desc">每 {config.autoCommentSeconds} 秒看一眼（30~1800）</span>
+                </div>
+                <input
+                  className="per-field-input"
+                  style={{ maxWidth: 92 }}
+                  type="number"
+                  inputMode="numeric"
+                  min={30}
+                  max={1800}
+                  value={config.autoCommentSeconds}
+                  aria-label="自主回复间隔秒数"
+                  onChange={e => {
+                    const n = Number(e.target.value);
+                    if (!Number.isFinite(n)) return;
+                    update({ autoCommentSeconds: Math.max(30, Math.min(1800, Math.round(n))) });
+                  }}
+                />
+              </div>
+              <div className="menu-item" style={{ cursor: "default", alignItems: "flex-start" }}>
+                <div className="menu-label-group">
+                  <span className="menu-label">本次最多说几轮</span>
+                  <span className="menu-desc">到数自动停（0 = 不限）。重开开关会重新计数</span>
+                </div>
+                <input
+                  className="per-field-input"
+                  style={{ maxWidth: 92 }}
+                  type="number"
+                  inputMode="numeric"
+                  min={0}
+                  max={99}
+                  value={config.autoCommentMaxRounds}
+                  aria-label="自主回复轮数上限"
+                  onChange={e => {
+                    const n = Number(e.target.value);
+                    if (!Number.isFinite(n)) return;
+                    update({ autoCommentMaxRounds: Math.max(0, Math.min(99, Math.round(n))) });
+                  }}
+                />
+              </div>
+              <div className="menu-item" style={{ cursor: "default" }}>
+                <div className="menu-label-group">
+                  <span className="menu-label">字幕气泡</span>
+                  <span className="menu-desc">
+                    {subtitleCap
+                      ? "开着时，回复会以气泡浮在你当前屏幕上；关掉就只进聊天"
+                      : "当前 App 版本还不支持字幕气泡，需要更新安卓壳"}
+                  </span>
+                </div>
+                <Toggle
+                  checked={config.subtitleEnabled !== false}
+                  onChange={(v: boolean) => update({ subtitleEnabled: v })}
+                />
+              </div>
+            </div>
+          )}
+
+          <div className="per-actions">
+            <button type="button" className="ui-btn ui-btn-outline" onClick={doTestScreenText}>
+              试读屏
+            </button>
+            <button type="button" className="ui-btn ui-btn-outline" onClick={doTestSubtitle}>
+              试气泡
+            </button>
           </div>
         </div>
 

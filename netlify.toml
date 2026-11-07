@@ -4,7 +4,7 @@
 
 # Keep this marker with the story tail-editor release so Netlify receives a
 # conventional config-file change and performs a fresh production build.
-# story-tail-editor-modal: 2026-09-11
+# chat-forced-offline-story-and-user-reference: 2026-11-04
 
 [[plugins]]
   package = "@netlify/plugin-nextjs"

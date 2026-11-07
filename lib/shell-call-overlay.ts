@@ -42,7 +42,7 @@ type ShellBridgeLike = {
 };
 
 /** 原生浮窗事件 */
-export type ShellOverlayAction = "restore" | "hangup" | "reply" | "tick" | "needPermission" | "accessibility" | "foregroundApp" | "screenshot" | "checkIn" | "userReply";
+export type ShellOverlayAction = "restore" | "hangup" | "reply" | "tick" | "needPermission" | "accessibility" | "foregroundApp" | "screenshot" | "checkIn" | "userReply" | "screen-tick" | "appGuard";
 
 export type ShellOverlayEvent = {
     action: ShellOverlayAction;
@@ -54,6 +54,12 @@ export type ShellOverlayEvent = {
     callId?: string;
     /** action='foregroundApp' 时的前台包名 */
     package?: string;
+    /** action='appGuard'：原生应用守卫的处置类型（overuse/sleep） */
+    kind?: string;
+    /** action='appGuard'：应用显示名 */
+    label?: string;
+    /** action='appGuard'：连续使用分钟数 */
+    minutes?: number;
     /** action='screenshot'：截屏是否成功 */
     ok?: boolean;
     /** action='screenshot' 失败时的原因 */

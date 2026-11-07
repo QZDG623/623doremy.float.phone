@@ -207,7 +207,8 @@ export function SystemCalendarSettings({ onNotice }: { onNotice?: (msg: string) 
         </div>
 
         <div className="per-note" style={{ padding: "0 var(--ui-padding, 16px)" }}>
-          角色要用这些，还要单独开能力：工具箱 → 内置能力 → 「系统日历」。
+          这里打开读或写，角色就能用——不需要再去工具箱里另开一次。
+          工具箱 → 内置能力 → 「系统日历」仍可当总闸；但在那里选「关闭」时，这里开了也不会生效。
         </div>
       </div>
     </div>

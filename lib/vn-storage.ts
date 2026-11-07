@@ -140,6 +140,11 @@ export function loadVnMessages(sessionId: string): VnMessage[] {
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
+/** 全部会话的漫卷消息（睡眠电台等跨 App 汇总用）。需先 hydrateVnStorage。 */
+export function loadAllVnMessages(): VnMessage[] {
+  return [..._messagesCache].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
 export function loadVnMessagesForChapter(sessionId: string, chapterIndex: number): VnMessage[] {
   return _messagesCache
     .filter((m) => m.sessionId === sessionId && m.chapterIndex === chapterIndex)

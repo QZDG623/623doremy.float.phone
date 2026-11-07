@@ -9,6 +9,7 @@ import { CloudBackupScheduler } from "@/components/cloud-backup-scheduler";
 import { RealityBridgeScheduler } from "@/components/reality-bridge-scheduler";
 import { WidgetScheduler } from "@/components/widget/widget-scheduler";
 import { CheckInScheduler } from "@/components/screenshot/checkin-scheduler";
+import { AutoCommentScheduler } from "@/components/screenshot/auto-comment-scheduler";
 import { installLifeScheduleProactiveScheduler } from "@/lib/life/life-proactive-scheduler";
 import { MediaMaintenanceScheduler } from "@/components/media-maintenance-scheduler";
 import { ShellPushRegistrar } from "@/components/shell-push-registrar";
@@ -367,6 +368,9 @@ export function MainApp() {
             {/* 查岗轮询 + 主动截屏接收端。必须挂在桌面壳这种「一直在跑」的地方：
                 角色查岗时用户多半正在别的 App 里，设置页根本没开着。 */}
             <CheckInScheduler />
+            {/* 自主回复：原生看屏节拍 → 读屏 → 生成 → 字幕气泡。
+                同样必须常驻：用户开启后正在别的 App 里，设置页收不到节拍。 */}
+            <AutoCommentScheduler />
             {/* 云端生活日程/离线主动消息调度必须挂在全局壳层，不能依赖生活页面保持打开。 */}
             <LifeScheduleScheduler />
             <MediaMaintenanceScheduler />

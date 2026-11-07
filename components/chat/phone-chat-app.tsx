@@ -43,6 +43,30 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
     const [dbReady, setDbReady] = useState(false);
     const [hideTabBar, setHideTabBar] = useState(false);
 
+    // 侧滑/返回键（安卓壳的 window.__floatHandleBack 会派发 float:back）：
+    // 聊天室里先退回会话列表，二级 tab 先回消息页，最后才由桌面壳关掉聊天 App。
+    // 这样侧滑只回上一界面，不会一下把整个聊天关掉。
+    useEffect(() => {
+        const handler = (event: Event) => {
+            if (activeSession) {
+                event.preventDefault();
+                setActiveSession(null);
+                return;
+            }
+            if (activeMascot) {
+                event.preventDefault();
+                setActiveMascot(false);
+                return;
+            }
+            if (activeTab !== "messages") {
+                event.preventDefault();
+                setActiveTab("messages");
+            }
+        };
+        window.addEventListener("float:back", handler);
+        return () => window.removeEventListener("float:back", handler);
+    }, [activeSession, activeMascot, activeTab]);
+
     // Hydrate IndexedDB → in-memory caches on mount
     useEffect(() => {
         hydrateChatStorage().then(() => {

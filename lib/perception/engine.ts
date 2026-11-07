@@ -22,23 +22,30 @@ import { isWithinPushQuietHours } from "../push-client";
 import { processBridgeItem } from "../reality-bridge/engine";
 import { loadBridgeRules } from "../reality-bridge/storage";
 import type { BridgeItem } from "../reality-bridge/types";
-import { ensureShellOverlayListener, subscribeShellOverlayEvents } from "../shell-call-overlay";
+import { ensureShellOverlayListener, subscribeShellOverlayEvents, type ShellOverlayEvent } from "../shell-call-overlay";
+import { sendShellNotification } from "../shell-notify";
+import { bringAppToFront, supportsAppGuard, syncAppGuardToNative } from "./app-guard";
 import {
   hasPerceptionBridge,
   readAppLabel,
   readLocation,
+  readNoiseDb,
+  readNowPlaying,
   readPerceptionSnapshot,
+  readScreenUsage,
   readSleep,
   readUsageStats,
   refreshHealth,
   refreshLocation,
   supportsHealth,
   supportsLocation,
+  supportsNoise,
+  supportsNowPlaying,
+  supportsScreenUsage,
   supportsUsageStats,
   supportsBackgroundDwellTracking,
   configureBackgroundPerception,
 } from "./bridge";
-import type { AppUsageEntry } from "./types";
 import { syncPerceptionToCloud } from "./cloud-sync";
 import {
   appendPerceptionLog,
@@ -50,9 +57,25 @@ import {
   savePerceptionStatus,
   type PerceptionRuntimeState,
 } from "./storage";
-import type { PerceptionCapability, PerceptionConfig, PerceptionSignal } from "./types";
+import type {
+  AppUsageEntry,
+  MotionSnapshot,
+  NowPlayingSnapshot,
+  PerceptionCapability,
+  PerceptionConfig,
+  PerceptionSignal,
+} from "./types";
 
 const HOUR_MS = 60 * 60 * 1000;
+
+/** 「屏幕用太久」的当天总时长阈值（分钟）。每天最多报一条。 */
+const SCREEN_LONG_MINUTES = 360;
+/** 每多少轮采样测一次噪音（麦克风采样较贵，默认 60 秒一轮 ≈ 5 分钟一次）。 */
+const NOISE_SAMPLE_EVERY = 5;
+/** 超过这个近似分贝才算「吵」，只在由安静变吵时报一次。 */
+const NOISE_LOUD_DB = 65;
+/** 噪音取样轮次计数器（进程内即可，不需要持久化）。 */
+let noiseTick = 0;
 
 let timer: number | null = null;
 let unsubscribeForeground: (() => void) | null = null;
@@ -112,7 +135,10 @@ async function emitSignal(
     return false;
   }
   // ② 安静时段
-  if (config.respectQuietHours && isWithinPushQuietHours(Date.now())) {
+  // 「该睡觉了」是用户主动设定的时间点，必须准点提醒——被安静时段吞掉
+  // 就完全失去意义（那正是夜里）。其余信号仍严格尊重安静时段。
+  const bypassQuietHours = signal.type === "该睡觉了";
+  if (!bypassQuietHours && config.respectQuietHours && isWithinPushQuietHours(Date.now())) {
     record("未投递", "处于安静时段");
     return false;
   }
@@ -212,14 +238,114 @@ async function sampleOnce(): Promise<void> {
     await checkDwell(config.appDwellMinutes, state);
   }
 
-  // ── 应用累计使用 ──
+  // ── 应用累计使用 / 屏幕使用总时长 ──
   // 每轮采样只读一次使用统计，喂给信号判定，再随状态缓存复用给
   // 「注入 / 主动查询 / 云端同步」。读两次结果是同一份，纯属白花开销。
-  const appUsage = supportsUsageStats() && isCapabilityEnabled(config, "usageStats")
-    ? readUsageStats(12)
-    : ([] as AppUsageEntry[]);
+  //
+  // 「屏幕使用总时长」与「各应用时长」是同一份数据的两种呈现：
+  // 新壳一次调用就同时给出两者，老壳只能给各应用时长——后者就把总时长留 -1，
+  // 不拿「各应用之和」冒充（系统组件不计入，算出来会偏小）。
+  let screenMinutes = -1;
+  let appUsage: AppUsageEntry[] = [];
+  const wantUsage = isCapabilityEnabled(config, "usageStats");
+  const wantScreenUsage = isCapabilityEnabled(config, "screenUsage");
+  if (wantScreenUsage && supportsScreenUsage()) {
+    const read = readScreenUsage(12);
+    if (read) {
+      screenMinutes = read.screenMinutes;
+      appUsage = read.appUsage;
+    }
+  } else if (wantUsage && supportsUsageStats()) {
+    appUsage = readUsageStats(12);
+  }
+  // 新版 APK 由原生无障碍服务按云端下发的阈值判定「应用用太久」，
+  // 网页端不再同时判定，避免双重触发；旧 APK/浏览器仍走这里。
   if (!nativeDwellTrackingConfigured) {
     await checkAppUsageSignal(config, state, appUsage);
+  }
+  if (wantScreenUsage && screenMinutes >= SCREEN_LONG_MINUTES) {
+    const today = localDayKey();
+    if (state.dailySignalDate[DAILY_KEY_SCREEN_LONG] !== today) {
+      const hours = Math.floor(screenMinutes / 60);
+      const mins = screenMinutes % 60;
+      const delivered = await emitSignal({
+        capability: "screenUsage",
+        type: "屏幕用太久",
+        payload: `今天屏幕已经用了 ${hours > 0 ? `${hours} 小时` : ""}${mins > 0 ? `${mins} 分钟` : ""}`,
+      }, state);
+      if (delivered) state.dailySignalDate[DAILY_KEY_SCREEN_LONG] = today;
+    }
+  }
+
+  // ── 设备动作（走 / 静止 / 躺）──
+  // 原生已经给出结论（步数变化率 + 重力方向），这里只管「结论变了要不要说话」。
+  // 读到 unknown（没传感器 / 没活动识别权限）时不更新基准——
+  // 否则一次读取失败就会把「躺下」的上一状态清空，下一次恢复时误报。
+  const motion = (isCapabilityEnabled(config, "motion") && snapshot.motion
+    ? snapshot.motion
+    : null) as MotionSnapshot | null;
+  if (motion && motion.activity !== "unknown") {
+    const prev = state.lastMotionActivity;
+    if (prev && prev !== motion.activity) {
+      const type = motion.activity === "walk"
+        ? "在走动"
+        : motion.activity === "lying"
+          ? "躺下了"
+          : prev === "lying" ? "坐起来了" : "停下来了";
+      await emitSignal({
+        capability: "motion",
+        type,
+        payload: motion.activity === "walk" && motion.perMinute > 0
+          ? `大约每分钟 ${motion.perMinute} 步`
+          : "",
+      }, state);
+    }
+    state.lastMotionActivity = motion.activity;
+  }
+
+  // ── 环境噪音 ──
+  // 麦克风采样比读传感器贵，也更像「在监听」，所以每 5 轮采样才测一次
+  // （默认 60 秒一轮 → 约 5 分钟一次），足够捕捉「环境变吵了」。
+  // 只在「由安静变吵」时报一次；一直吵着不会每分钟念一遍。
+  let noiseDb = -1;
+  if (isCapabilityEnabled(config, "noise") && supportsNoise()) {
+    noiseTick += 1;
+    if (noiseTick % NOISE_SAMPLE_EVERY === 1) {
+      const noise = readNoiseDb();
+      if (noise) {
+        noiseDb = noise.db;
+        const wasQuiet = state.lastNoiseDb < 0 || state.lastNoiseDb < NOISE_LOUD_DB;
+        if (noise.db >= NOISE_LOUD_DB && wasQuiet) {
+          await emitSignal({
+            capability: "noise",
+            type: "环境变吵了",
+            payload: `大约 ${Math.round(noise.db)} 分贝`,
+          }, state);
+        }
+        state.lastNoiseDb = noise.db;
+      }
+    }
+  }
+
+  // ── 当前在听什么 ──
+  // 只在「开始播放」与「换了一首」时报；同一首歌循环播放不重复报。
+  // 没在听（暂停 / 没开媒体）不发信号，但要把基准清空，
+  // 这样下次重新播放同一首也算「开始听」。
+  let nowPlaying: NowPlayingSnapshot | null = null;
+  if (isCapabilityEnabled(config, "nowPlaying") && supportsNowPlaying()) {
+    nowPlaying = readNowPlaying();
+    const key = nowPlaying ? `${nowPlaying.app}|${nowPlaying.title}|${nowPlaying.artist}` : "";
+    if (nowPlaying && key !== state.lastNowPlayingKey) {
+      const title = nowPlaying.title || "一首没标题的歌";
+      await emitSignal({
+        capability: "nowPlaying",
+        type: state.lastNowPlayingKey ? "换了一首歌" : "开始听歌",
+        payload: nowPlaying.artist
+          ? `${title} - ${nowPlaying.artist}`
+          : `${title}${nowPlaying.app ? `（${nowPlaying.app}）` : ""}`,
+      }, state);
+    }
+    state.lastNowPlayingKey = key;
   }
 
   // ── 作息与习惯 ──
@@ -273,6 +399,10 @@ async function sampleOnce(): Promise<void> {
       ? Math.max(0, Math.floor((Date.now() - state.dwellSince) / 60000))
       : 0,
     steps: snapshot.steps,
+    motion,
+    noiseDb,
+    nowPlaying,
+    screenMinutes,
     appUsage,
     location,
     sleep,
@@ -397,6 +527,8 @@ async function checkAppUsageSignal(
 const DAILY_KEY_LATE_NIGHT = "lateNight";
 const DAILY_KEY_FIRST_OPEN = "firstOpen";
 const DAILY_KEY_NO_TALK = "noTalk";
+const DAILY_KEY_BEDTIME = "bedtime";
+const DAILY_KEY_SCREEN_LONG = "screenLong";
 
 /**
  * 深夜还醒着。
@@ -449,6 +581,47 @@ const NO_TALK_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 let lastNoTalkCheckAt = 0;
 
 /**
+ * 让角色用气泡说一句（被冷落 / 久坐提醒），同时把这句话写进最近的私聊。
+ *
+ * 复用看屏自主回复的那一条链路（后台回复 → 最新一条 → 逐句气泡），
+ * 不另造一套生成逻辑：语气、上下文、限流都已经在那边打磨过。
+ *
+ * 任何一步失败都静默：这是附加表现，不能让感知采样被拖住或报错。
+ * 用 void 调用而不是 await——模型生成可能要几十秒，采样循环不能被它卡住。
+ */
+function speakEmotionBubble(note: string): void {
+  void (async () => {
+    try {
+      const { chatDb } = await import("../chat-db");
+      const sessions = await chatDb.sessions.toArray();
+      const latest = sessions
+        .filter(session => !session.isGroup && session.updatedAt)
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+      if (!latest) return;
+
+      const { requestBackgroundChatReply } = await import("../follow-up-service");
+      const { loadChatMessages } = await import("../chat-storage");
+      const { speakInBubbles } = await import("../screenshot/character-bubble");
+
+      const startedAt = Date.now();
+      const result = await requestBackgroundChatReply(latest.id, { ephemeralSystemNote: note });
+      if (!result.ok) return;
+
+      const messages = loadChatMessages(latest.id, 10);
+      const reply = [...messages].reverse().find(message => (
+        message.role === "assistant"
+        && new Date(message.createdAt).getTime() >= startedAt
+        && typeof message.content === "string"
+        && message.content.trim().length > 0
+      ));
+      if (reply) await speakInBubbles(reply.content);
+    } catch {
+      // 静默：没生成出来就当这一轮没发生
+    }
+  })();
+}
+
+/**
  * 很久没聊天。
  *
  * 「说话」按**任意一方**最后一条消息算（会话的 updatedAt）：是真正的双向沉默，
@@ -492,14 +665,55 @@ async function checkNoTalk(config: PerceptionConfig, state: PerceptionRuntimeSta
     type: "很久没聊天",
     payload: `已经 ${Math.floor(gapHours)} 小时没说话了`,
   }, state);
-  if (delivered) state.dailySignalDate[DAILY_KEY_NO_TALK] = today;
+  if (delivered) {
+    state.dailySignalDate[DAILY_KEY_NO_TALK] = today;
+    // 信号投递成功后，让角色用气泡表达「被冷落」的小情绪。
+    // 与聊天里的回复共用同一段生成，避免「只有流水、没人说话」的空落感。
+    speakEmotionBubble(
+      `（TA 已经 ${Math.floor(gapHours)} 小时没和你说过话了。`
+      + "请以你自己的性格主动说两句话，表达有点被冷落、想 TA 回来说说话的小情绪；"
+      + "不要指责、不要长篇，两到三句口语短句。）",
+    );
+  }
 }
+
+/**
+ * 到点该睡觉了。
+ *
+ * 与「深夜还醒着」不同：这条是用户**主动设定的时间点**，语义是命令而不是观察，
+ * 所以要绕开安静时段（见 emitSignal 的 bypassQuietHours）。
+ * 只在到点后 2 小时内报一次：App 第二天下午才被打开时，不该补一句「该睡觉了」。
+ */
+async function checkBedtime(config: PerceptionConfig, state: PerceptionRuntimeState): Promise<void> {
+  if (config.bedtimeHour < 0) return;
+  const now = new Date();
+  const windowStart = now.getTime() - BEDTIME_WINDOW_MS;
+  const target = new Date(now);
+  target.setHours(config.bedtimeHour, config.bedtimeMinute, 0, 0);
+  if (target.getTime() > now.getTime()) return;
+  if (target.getTime() < windowStart) return;
+
+  const today = localDayKey();
+  if (state.dailySignalDate[DAILY_KEY_BEDTIME] === today) return;
+
+  const p2 = (n: number) => String(n).padStart(2, "0");
+  const delivered = await emitSignal({
+    capability: "lifeRhythm",
+    type: "该睡觉了",
+    payload: `已经 ${p2(config.bedtimeHour)}:${p2(config.bedtimeMinute)}，该睡觉了`,
+  }, state);
+  if (delivered) state.dailySignalDate[DAILY_KEY_BEDTIME] = today;
+}
+
+/** 「该睡觉了」的有效窗口：到点后这么久之内才提。 */
+const BEDTIME_WINDOW_MS = 2 * 60 * 60 * 1000;
 
 /** 三个「作息与习惯」信号的统一入口。 */
 async function checkLifeRhythm(config: PerceptionConfig, state: PerceptionRuntimeState): Promise<void> {
   await checkLateNight(config, state);
   await checkFirstOpenToday(state);
   await checkNoTalk(config, state);
+  await checkBedtime(config, state);
 }
 
 /**
@@ -549,7 +763,15 @@ async function checkSitStill(
     type: "久坐不动",
     payload: `已经 ${minutes} 分钟没怎么动了`,
   }, state);
-  if (delivered) state.sitReported = true;
+  if (delivered) {
+    state.sitReported = true;
+    // 用气泡提醒起来活动一下，而不是只在流水里记一笔。
+    speakEmotionBubble(
+      `（TA 已经 ${minutes} 分钟没怎么动了，可能一直坐着。`
+      + "请主动说两句话提醒 TA 起来活动一下，语气自然、像身边人的关心，"
+      + "不要像健康 App 的提示，两到三句口语短句。）",
+    );
+  }
 }
 
 /** 两个坐标之间的大致距离（米）。用等距圆柱近似——几百米到几公里量级足够。 */
@@ -673,15 +895,95 @@ async function checkWakeUp(
 /** 「刚醒」的有效窗口（小时）。超过就不提了。 */
 const WAKE_RECENT_HOURS = 6;
 
-/** 前台应用变化：只更新基准，不在这里上报（判断统一在 checkDwell）。 */
+/** 小手机自己的包名。守卫和锁都不能拦它，否则用户回不来。 */
+const SELF_PACKAGE = "app.floatphone.shell";
+
+/** 同一条「打开应用」信号的冷却：10 分钟内同一个应用只报一次，避免来回切屏刷屏。 */
+const WATCHED_OPEN_COOLDOWN_MS = 10 * 60 * 1000;
+
+/** 关键词是否命中某个应用（显示名或包名的包含匹配，不区分大小写）。 */
+function matchesAppKeywords(keywords: string[], pkg: string, label: string): boolean {
+  const labelLower = label.toLowerCase();
+  const pkgLower = pkg.toLowerCase();
+  return keywords.some(keyword => {
+    const key = keyword.trim().toLowerCase();
+    return key.length > 0 && (labelLower.includes(key) || pkgLower.includes(key));
+  });
+}
+
+/**
+ * 前台应用变化。
+ *
+ * 两件事一起做：
+ *   ① 更新「连续停留」基准（真正的判断在 checkDwell）；
+ *   ② 关注应用**一打开**就发一条「打开应用」信号——这正是用户要的
+ *      「刷就弹提醒」，而不是等到连续用满 20 分钟。
+ *
+ * 强行拉回小手机交给原生守卫（见 app-guard.ts）：网页在后台会被节流，
+ * 这里只在老壳/浏览器上做个兜底。
+ */
 function onForegroundApp(pkg: string): void {
   if (!pkg) return;
   const state = loadPerceptionState();
-  if (state.dwellPackage === pkg) return;
-  state.dwellPackage = pkg;
-  state.dwellSince = Date.now();
-  state.dwellReported = "";
+  const changed = state.dwellPackage !== pkg;
+  if (changed) {
+    state.dwellPackage = pkg;
+    state.dwellSince = Date.now();
+    state.dwellReported = "";
+    savePerceptionState(state);
+  }
+  if (!changed || pkg === SELF_PACKAGE) return;
+
+  const config = loadPerceptionConfig();
+  if (!config.enabled) return;
+  if (!isCapabilityEnabled(config, "foregroundApp")) return;
+  if (!config.appOpenWatchList.length) return;
+
+  const label = readAppLabel(pkg) || pkg;
+  if (!matchesAppKeywords(config.appOpenWatchList, pkg, label)) return;
+
+  const now = Date.now();
+  if (state.lastWatchedOpenPkg === pkg && now - state.lastWatchedOpenAt < WATCHED_OPEN_COOLDOWN_MS) return;
+  state.lastWatchedOpenPkg = pkg;
+  state.lastWatchedOpenAt = now;
   savePerceptionState(state);
+
+  // 原生通知：即使现实桥没配规则，用户也能立刻看到「角色发现了」。
+  // 通知失败（非壳环境）不影响后面的信号投递。
+  try {
+    sendShellNotification("角色注意到你了", `你打开了「${label}」`);
+  } catch {
+    /* 忽略 */
+  }
+  // 老壳没有原生守卫时兜底拉回小手机；新壳由原生在事件发生的瞬间处理，
+  // 这里再调一次只会让用户看到一次多余的切屏。
+  if (config.appOpenReturnToFloat && !supportsAppGuard()) {
+    bringAppToFront();
+  }
+
+  void emitSignal({
+    capability: "foregroundApp",
+    type: "打开应用",
+    payload: label,
+  }, state);
+}
+
+/**
+ * 原生应用守卫的处置回传：让角色也能感知到「用太久被拦下」，
+ * 而不是只有一块冷冰冰的遮罩。
+ */
+function onAppGuardEvent(event: ShellOverlayEvent): void {
+  if (event.kind !== "overuse") return;
+  const config = loadPerceptionConfig();
+  if (!config.enabled) return;
+  const label = event.label?.trim() || event.package?.trim() || "这个应用";
+  const minutes = event.minutes && event.minutes > 0 ? `连续用了 ${event.minutes} 分钟` : "用太久了";
+  const state = loadPerceptionState();
+  void emitSignal({
+    capability: "foregroundApp",
+    type: "用太久",
+    payload: `${label}${minutes}`,
+  }, state);
 }
 
 // ── 回到手机（回归信号）──
@@ -841,11 +1143,16 @@ export async function startPerception(): Promise<void> {
     unsubscribeBridgeRules = () => window.removeEventListener("reality-bridge-rules-updated", onRulesUpdated);
   }
 
+  // 把「关注应用 / 睡眠锁」配置写进原生：无障碍服务要脱离网页实时生效。
+  syncAppGuardToNative(loadPerceptionConfig());
+
   // 前台应用事件来自无障碍服务，经壳的 shell-call-overlay 通道过来。
   // 与通话浮窗共用同一条通道（ensureShellOverlayListener 幂等）。
   ensureShellOverlayListener();
   unsubscribeForeground = subscribeShellOverlayEvents(event => {
     if (event.action === "foregroundApp" && event.package) onForegroundApp(event.package);
+    // 原生守卫处置「用太久」时回传一条事件，让角色能感知到并做出反应
+    if (event.action === "appGuard") onAppGuardEvent(event);
   });
 
   // 前后台切换 → 「回到手机」信号。与页面可见性绑定而非 focus 事件：

@@ -21,6 +21,18 @@ export type ScreenshotCapabilities = {
   accessibilityOn?: boolean;
   /** 现在是否真的可以截（supported && accessibilityOn） */
   ready?: boolean;
+  /** 能不能读当前屏幕上的文字（不截图，无障碍遍历） */
+  screenText?: boolean;
+  /** 能不能弹字幕气泡（无障碍浮层） */
+  subtitle?: boolean;
+};
+
+/** 读一次屏幕文字的结果。 */
+export type ScreenTextRead = {
+  /** 屏幕上的文字（已去重、最多约 3000 字） */
+  text: string;
+  /** 当前前台应用包名（原生给，取不到为空串） */
+  pkg: string;
 };
 
 /** 原生推回的一张截屏。成功时带 PNG base64 与尺寸。 */
@@ -112,7 +124,7 @@ export type CheckInCapabilities = {
  * 所以无论同意还是拒绝都会带回来——用户主动打的字不该被吞掉。
  */
 export type CheckInOutcome =
-  | { accepted: true; base64: string; width: number; height: number; reply?: string; characterId?: string }
+  | { accepted: true; base64: string; width: number; height: number; bytes?: number; reply?: string; characterId?: string }
   | { accepted: false; reason: string; reply?: string; characterId?: string };
 
 /**

@@ -14,6 +14,7 @@ import {
   readSleep,
   readUsageStats,
 } from "./bridge";
+import { hasCalendarReadPermission } from "../system-calendar";
 import { isPerceptionRunning } from "./engine";
 import { isCapabilityEnabled, loadPerceptionConfig, loadPerceptionState, loadPerceptionStatus } from "./storage";
 import {
@@ -104,7 +105,8 @@ export function buildCapabilityRows(): CapabilityRow[] {
   const health = readHealthCapabilities();
 
   const ids: PerceptionCapability[] = [
-    "battery", "network", "foregroundApp", "steps", "location", "sleep", "calendar", "contacts", "usageStats", "returnToPhone", "lifeRhythm",
+    "battery", "network", "foregroundApp", "steps", "motion", "noise", "nowPlaying",
+    "screenUsage", "usageStats", "location", "sleep", "calendar", "contacts", "returnToPhone", "lifeRhythm",
   ];
 
   return ids.map(id => {
@@ -125,6 +127,22 @@ export function buildCapabilityRows(): CapabilityRow[] {
     if (id === "usageStats" && nativeSupported && native.usageStatsGranted !== true) {
       missingRequirement = "需要「使用情况访问」权限（系统设置里手动开）";
     }
+    // 屏幕使用总时长与使用统计是同一份数据，同一道权限闸。
+    if (id === "screenUsage" && nativeSupported && native.usageStatsGranted !== true) {
+      missingRequirement = "需要「使用情况访问」权限（系统设置里手动开）";
+    }
+    // 设备动作：新壳才提供；支持但为 false = 活动识别权限没给。
+    if (id === "motion" && !nativeSupported) {
+      missingRequirement = "需要更新 APK，或先授予活动识别权限";
+    }
+    // 噪音：新壳才提供；支持但为 false = 录音权限没给。
+    if (id === "noise" && !nativeSupported) {
+      missingRequirement = "需要更新 APK，或先授予录音权限";
+    }
+    // 当前在听：需要通知使用权（系统设置里手动开）。
+    if (id === "nowPlaying" && !nativeSupported) {
+      missingRequirement = "需要「通知使用权」（系统设置里手动开），或更新 APK";
+    }
     // 定位：两层前置，且必须分开报——「权限给了但定位开关关着」是最容易
     // 被漏掉的一种（用户会以为权限都给了怎么还读不到）。
     if (id === "location" && nativeSupported) {
@@ -133,6 +151,10 @@ export function buildCapabilityRows(): CapabilityRow[] {
       } else if (native.locationServiceOn !== true) {
         missingRequirement = "系统定位开关没开";
       }
+    }
+    // 系统日历：能力已接通，但读取权限没给就读不到日程。
+    if (id === "calendar" && nativeSupported && !hasCalendarReadPermission()) {
+      missingRequirement = "需要读取系统日历权限";
     }
     // 睡眠：三层前置，逐个报清楚，否则用户只会看到「开了却没反应」。
     // 顺序按可操作性排：先装（没装就得去装），再授权。

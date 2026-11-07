@@ -71,6 +71,8 @@ export function StoryPaginationManager(props: StoryPaginationManagerProps) {
   const [memorySettingsDraft, setMemorySettingsDraft] = useState<StoryMemorySettings>({ ...DEFAULT_STORY_MEMORY_SETTINGS, readableBranchIds: [], sharedMemoryTypes: [...DEFAULT_STORY_MEMORY_SETTINGS.sharedMemoryTypes] });
   const [deleteSelection, setDeleteSelection] = useState<string[]>([]);
   const [tagDraft, setTagDraft] = useState("");
+  // 目录分组折叠状态：主线常驻展开，分线与独立剧情默认收起
+  const [openDirectoryGroups, setOpenDirectoryGroups] = useState<{ branch: boolean; independent: boolean }>({ branch: false, independent: false });
   const storyAvatarInputRef = useRef<HTMLInputElement>(null);
 
   const activeGroup = props.groups.find((group) => group.id === props.activeGroupId) || null;
@@ -85,6 +87,10 @@ export function StoryPaginationManager(props: StoryPaginationManagerProps) {
     ? `${activeOwnerCharacters.map((character) => character.name).join(" × ")} × ${props.userName}`
     : `${activeOwnerCharacters[0]?.name || "char"} × ${props.userName}`;
   const tags = mainSession?.catalogTags || [];
+  // 目录分三类展示：主线（固定不可删）、分线、独立剧情
+  const mainSessions = props.sessions.filter((session) => (session.branchId || "main") === "main");
+  const branchSessions = props.sessions.filter((session) => (session.branchId || "main") !== "main" && !session.independentStory);
+  const independentSessions = props.sessions.filter((session) => (session.branchId || "main") !== "main" && session.independentStory);
 
   useEffect(() => {
     setDeleteSelection((current) => current.filter((id) => props.sessions.some((session) => session.id === id && (session.branchId || "main") !== "main")));
@@ -158,6 +164,66 @@ export function StoryPaginationManager(props: StoryPaginationManagerProps) {
     } catch {
       window.alert("剧情头像处理失败，请换一张图片重试");
     }
+  };
+
+  const renderSessionRow = (session: StorySession) => {
+    const isMain = (session.branchId || "main") === "main";
+    const isSelected = deleteSelection.includes(session.id);
+    const index = props.sessions.findIndex((item) => item.id === session.id);
+    return (
+      <div key={session.id} className="story-directory-row" data-active={session.id === props.activeSessionId ? "true" : undefined}>
+        <label className="story-directory-check">
+          <input
+            type="checkbox"
+            disabled={isMain}
+            checked={!isMain && isSelected}
+            onChange={(event) => setDeleteSelection((current) => event.target.checked ? [...current, session.id] : current.filter((id) => id !== session.id))}
+          />
+        </label>
+        <div className="story-directory-open" role="button" tabIndex={0} onClick={() => {
+          props.onSessionSelect(session.id);
+          setCatalogOpen(false);
+        }} onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            props.onSessionSelect(session.id);
+            setCatalogOpen(false);
+          }
+        }}>
+          <span className="story-directory-number">第 {index + 1} 节</span>
+          <span>
+            {isMain ? <strong>主线剧情</strong> : (
+              <input
+                value={session.branchName || "分线剧情"}
+                aria-label="分线名称"
+                onClick={(event) => event.stopPropagation()}
+                onKeyDown={(event) => event.stopPropagation()}
+                onChange={(event) => props.onSessionUpdate(session.id, { branchName: event.target.value })}
+              />
+            )}
+            <small>
+              {isMain ? "默认主线 · 不可更名删除" : [
+                session.independentStory ? "独立剧情" : "角色记忆",
+                session.inheritRecentMemory ? "已继承最近记忆" : "从创建时开始",
+              ].join(" · ")}
+            </small>
+            <small className="story-directory-date">最近聊天：{session.lastMessageAt || session.lastMessageId ? new Date(session.lastMessageAt || session.updatedAt).toLocaleString() : "还没有聊天"}</small>
+          </span>
+        </div>
+        <div className="story-directory-actions">
+          {!isMain && session.independentStory && !session.includedInMemoryAt ? (
+            <button type="button" className="story-branch-memory" onClick={() => {
+              if (window.confirm("结束这条独立剧情并把剧情摘要加入角色记忆？")) {
+                const now = new Date().toISOString();
+                props.onSessionUpdate(session.id, { endedAt: now, includedInMemoryAt: now });
+              }
+            }}>结束并加入记忆</button>
+          ) : null}
+          <button type="button" className="story-branch-memory" onClick={() => openBranchMemorySettings(session)}>记忆设置</button>
+          <button type="button" className="story-branch-export" aria-label={`导出${session.branchName || "剧情"}`} onClick={() => props.onExportSession(session.id)}><ArrowDownTrayIcon width={14} /></button>
+        </div>
+      </div>
+    );
   };
 
   return (
@@ -243,7 +309,7 @@ export function StoryPaginationManager(props: StoryPaginationManagerProps) {
             <ChevronRightIcon width={16} />
           </button>
           <button type="button" onClick={() => setCatalogOpen(true)}>
-            <span><strong>分线剧情</strong><small>{Math.max(0, props.sessions.length - 1)} 条分线 · 打开目录管理</small></span>
+            <span><strong>剧情目录</strong><small>{branchSessions.length} 条分线 · {independentSessions.length} 条独立剧情 · 打开目录管理</small></span>
             <ChevronRightIcon width={16} />
           </button>
         </div>
@@ -296,64 +362,51 @@ export function StoryPaginationManager(props: StoryPaginationManagerProps) {
                 </div>
               </div>
               <div className="story-directory-list">
-                {props.sessions.map((session, index) => {
-                  const isMain = (session.branchId || "main") === "main";
-                  const isSelected = deleteSelection.includes(session.id);
-                  return (
-                    <div key={session.id} className="story-directory-row" data-active={session.id === props.activeSessionId ? "true" : undefined}>
-                      <label className="story-directory-check">
-                        <input
-                          type="checkbox"
-                          disabled={isMain}
-                          checked={!isMain && isSelected}
-                          onChange={(event) => setDeleteSelection((current) => event.target.checked ? [...current, session.id] : current.filter((id) => id !== session.id))}
-                        />
-                      </label>
-                      <div className="story-directory-open" role="button" tabIndex={0} onClick={() => {
-                        props.onSessionSelect(session.id);
-                        setCatalogOpen(false);
-                      }} onKeyDown={(event) => {
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          props.onSessionSelect(session.id);
-                          setCatalogOpen(false);
-                        }
-                      }}>
-                        <span className="story-directory-number">第 {index + 1} 节</span>
-                        <span>
-                          {isMain ? <strong>主线剧情</strong> : (
-                            <input
-                              value={session.branchName || "分线剧情"}
-                              aria-label="分线名称"
-                              onClick={(event) => event.stopPropagation()}
-                              onKeyDown={(event) => event.stopPropagation()}
-                              onChange={(event) => props.onSessionUpdate(session.id, { branchName: event.target.value })}
-                            />
-                          )}
-                          <small>
-                            {isMain ? "默认主线 · 不可更名删除" : [
-                              session.independentStory ? "独立剧情" : "角色记忆",
-                              session.inheritRecentMemory ? "已继承最近记忆" : "从创建时开始",
-                            ].join(" · ")}
-                          </small>
-                          <small className="story-directory-date">最近聊天：{session.lastMessageAt || session.lastMessageId ? new Date(session.lastMessageAt || session.updatedAt).toLocaleString() : "还没有聊天"}</small>
-                        </span>
-                      </div>
-                      <div className="story-directory-actions">
-                        {!isMain && session.independentStory && !session.includedInMemoryAt ? (
-                          <button type="button" className="story-branch-memory" onClick={() => {
-                            if (window.confirm("结束这条独立剧情并把剧情摘要加入角色记忆？")) {
-                              const now = new Date().toISOString();
-                              props.onSessionUpdate(session.id, { endedAt: now, includedInMemoryAt: now });
-                            }
-                          }}>结束并加入记忆</button>
-                        ) : null}
-                        <button type="button" className="story-branch-memory" onClick={() => openBranchMemorySettings(session)}>记忆设置</button>
-                        <button type="button" className="story-branch-export" aria-label={`导出${session.branchName || "剧情"}`} onClick={() => props.onExportSession(session.id)}><ArrowDownTrayIcon width={14} /></button>
-                      </div>
+                <div className="story-directory-group">
+                  <div className="story-directory-group-head" data-static="true">
+                    <strong>主线</strong>
+                    <span className="story-directory-group-count">{mainSessions.length}</span>
+                  </div>
+                  <div className="story-directory-group-body">
+                    {mainSessions.map(renderSessionRow)}
+                  </div>
+                </div>
+
+                <div className="story-directory-group" data-open={openDirectoryGroups.branch ? "true" : undefined}>
+                  <button
+                    type="button"
+                    className="story-directory-group-head"
+                    aria-expanded={openDirectoryGroups.branch}
+                    onClick={() => setOpenDirectoryGroups((current) => ({ ...current, branch: !current.branch }))}
+                  >
+                    <ChevronRightIcon width={15} className="story-directory-group-arrow" />
+                    <strong>分线</strong>
+                    <span className="story-directory-group-count">{branchSessions.length}</span>
+                  </button>
+                  {openDirectoryGroups.branch ? (
+                    <div className="story-directory-group-body">
+                      {branchSessions.length ? branchSessions.map(renderSessionRow) : <p className="story-directory-group-empty">还没有分线剧情</p>}
                     </div>
-                  );
-                })}
+                  ) : null}
+                </div>
+
+                <div className="story-directory-group" data-open={openDirectoryGroups.independent ? "true" : undefined}>
+                  <button
+                    type="button"
+                    className="story-directory-group-head"
+                    aria-expanded={openDirectoryGroups.independent}
+                    onClick={() => setOpenDirectoryGroups((current) => ({ ...current, independent: !current.independent }))}
+                  >
+                    <ChevronRightIcon width={15} className="story-directory-group-arrow" />
+                    <strong>独立剧情</strong>
+                    <span className="story-directory-group-count">{independentSessions.length}</span>
+                  </button>
+                  {openDirectoryGroups.independent ? (
+                    <div className="story-directory-group-body">
+                      {independentSessions.length ? independentSessions.map(renderSessionRow) : <p className="story-directory-group-empty">还没有独立剧情</p>}
+                    </div>
+                  ) : null}
+                </div>
               </div>
             </section>
           </main>

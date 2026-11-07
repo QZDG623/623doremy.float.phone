@@ -10,6 +10,7 @@ import { downloadFile } from "@/lib/download-utils";
 import type { Character } from "@/lib/character-types";
 import type { PresetConfig } from "@/lib/settings-types";
 import type { StoryCharacterSettings, StoryGroup, StoryProseStyleScheme, StoryQuickInputScheme, StorySchemeRepository, StorySession, StoryTailScheme, StoryUiPrefs } from "@/lib/story-storage";
+import type { StoryGenerationPrefs } from "@/lib/story-generation-prefs";
 import {
   STORY_DEFAULT_STATUS_RENDER,
   STORY_DEFAULT_THEATER_RENDER,
@@ -48,6 +49,9 @@ type StorySettingsPageProps = {
   onExportAll: () => void;
   onUiPrefsChange: (prefs: StoryUiPrefs) => void;
   onSettingsChange: (settings: StoryCharacterSettings) => void;
+  /** 通用生成能力开关：所有角色、多人组、主线和分线共同使用。 */
+  generationPrefs: StoryGenerationPrefs;
+  onGenerationPrefsChange: (prefs: StoryGenerationPrefs) => void;
   /** 编辑公用仓库里的方案定义（新增/删除/改名/改内容都在这里落盘）。 */
   onSchemeRepoChange: (repo: StorySchemeRepository) => void;
   onTagsChange: (foldTags: string, contextExcludedTags: string) => void;
@@ -564,6 +568,27 @@ export function StorySettingsPage(props: StorySettingsPageProps) {
           onExportAll={props.onExportAll}
         />
 
+        <SettingCard title="通用生成能力" hint="这里的开关由所有角色、多人组、主线和分线共同使用">
+          <ToggleRow
+            title="剧情时截断当前角色后台主动发消息活动"
+            detail="开启后，剧情页面进行期间检测到当前角色正在主动发消息或追加消息，会立即中止对应的后台 API 请求"
+            checked={props.generationPrefs.interruptBackgroundMessages}
+            onChange={(value) => props.onGenerationPrefsChange({ ...props.generationPrefs, interruptBackgroundMessages: value })}
+          />
+          <ToggleRow
+            title="通用流式输出"
+            detail="开启后剧情正文会随着模型返回实时显示；不支持流式的接口会在未输出内容时自动回退普通生成"
+            checked={props.generationPrefs.streamOutput}
+            onChange={(value) => props.onGenerationPrefsChange({ ...props.generationPrefs, streamOutput: value })}
+          />
+          <ToggleRow
+            title="时间感知"
+            detail="开启后每轮剧情都会注入当前日期时间，并按时间先后理解剧情和历史消息"
+            checked={props.generationPrefs.timeAware}
+            onChange={(value) => props.onGenerationPrefsChange({ ...props.generationPrefs, timeAware: value })}
+          />
+        </SettingCard>
+
         <SettingCard title="剧情预设设置" hint="建议给剧情 APP 单独制作专属预设，避免影响其他应用">
           <label className="story-settings-field"><span>当前角色专属预设名称</span><input value={normalized.presetName} onChange={(event) => patchSettings({ presetName: event.target.value })} /></label>
           <label className="story-settings-field"><span>剧情额外要求</span><textarea value={normalized.extraPrompt || ""} onChange={(event) => patchSettings({ extraPrompt: event.target.value })} placeholder="仅在当前角色的剧情生成中使用" /></label>
@@ -712,13 +737,25 @@ export function StorySettingsPage(props: StorySettingsPageProps) {
           ) : null}
         </SettingCard>
 
-        <SettingCard title="剧情尾部" hint="状态栏与小剧场方案保存在公用仓库，所有角色共享；每个角色单独选择启用哪一套">
+        <SettingCard title="剧情尾部" hint="两个开关只控制后续请求是否要求 AI 生成对应内容，不处理以前已经生成的消息">
+          <ToggleRow
+            title="生成状态栏"
+            detail="关闭后不再把状态栏方案的提示词发送给 AI"
+            checked={normalized.generateStatusBar !== false}
+            onChange={(value) => patchSettings({ generateStatusBar: value })}
+          />
           <SchemeEditor label="状态栏方案" schemes={repo.statusSchemes} activeId={normalized.activeStatusSchemeId!} tag="story_status" contextNote="进入上下文" onChange={(schemes, activeStatusSchemeId) => { patchRepo({ statusSchemes: schemes }); patchSettings({ activeStatusSchemeId }); }} />
+          <ToggleRow
+            title="生成小剧场"
+            detail="关闭后不再把小剧场方案的提示词发送给 AI"
+            checked={normalized.generateTheater !== false}
+            onChange={(value) => patchSettings({ generateTheater: value })}
+          />
           <SchemeEditor label="小剧场方案" schemes={repo.theaterSchemes} activeId={normalized.activeTheaterSchemeId!} tag="story_theater" contextNote="默认不进上下文" onChange={(schemes, activeTheaterSchemeId) => { patchRepo({ theaterSchemes: schemes }); patchSettings({ activeTheaterSchemeId }); }} />
         </SettingCard>
 
         <SettingCard title="悬浮小手机" hint="开启后剧情正文右侧出现手机悬浮球">
-          <ToggleRow title="启用悬浮小手机" detail="居中打开窄版小手机，显示与当前角色的线上聊天记录" checked={Boolean(normalized.floatingPhoneEnabled)} onChange={(value) => patchSettings({ floatingPhoneEnabled: value })} />
+          <ToggleRow title="启用悬浮小手机" detail="居中打开完整聊天界面，可切换角色、查看联系人/朋友圈与设置" checked={Boolean(normalized.floatingPhoneEnabled)} onChange={(value) => patchSettings({ floatingPhoneEnabled: value })} />
           <ToggleRow title="聊天记录衔接剧情上下文" detail="生成剧情时带入小手机最近的线上消息" checked={Boolean(normalized.floatingPhoneInContext)} onChange={(value) => patchSettings({ floatingPhoneInContext: value })} />
         </SettingCard>
 

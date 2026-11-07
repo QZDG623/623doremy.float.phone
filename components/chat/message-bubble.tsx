@@ -1913,10 +1913,16 @@ function StickerBubble({ msg, characterId }: { msg: ChatMessage; characterId?: s
             </div>
         );
     }
-    // 3. No match — show label as styled tag
+    // 3. No match — the sticker image/name is no longer available. Never fall back to
+    //    raw `[label]` text: show a neutral placeholder instead so deleted stickers
+    //    can't leak out as chat text.
     return (
-        <div className="chat-sticker chat-sticker-fallback px-4 py-2 ts-14 text-[var(--c-text)] bg-black/5 rounded-lg text-center">
-            [{label || "表情包"}]
+        <div className="chat-sticker chat-sticker-fallback sticker-bounce px-3 py-3" title="表情包已失效">
+            <svg width="72" height="72" viewBox="0 0 72 72" fill="none" aria-hidden="true">
+                <rect x="14" y="18" width="44" height="36" rx="7" fill="currentColor" opacity="0.12" />
+                <circle cx="28" cy="31" r="4" fill="currentColor" opacity="0.35" />
+                <path d="M18 48l12-11 8 7 10-9 8 13" stroke="currentColor" strokeOpacity="0.35" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
         </div>
     );
 }
@@ -2602,11 +2608,28 @@ function synthesizeVoiceForMessage(msgId: string, characterId: string, speechTex
     const existing = _voiceSynthInFlight.get(msgId);
     if (existing) return existing;
     const task = (async () => {
-        const { resolveVoiceConfig, synthesizeSpeech } = await import("@/lib/tts-service");
-        const vc = resolveVoiceConfig(characterId);
-        if (!vc) throw new Error("未绑定语音配置");
-        const blob = await synthesizeSpeech(speechText, vc);
-        if (!blob) throw new Error("合成失败");
+        const { resolveVoiceConfigCandidates, synthesizeSpeech } = await import("@/lib/tts-service");
+        // 绑定方案优先；绑定槽位指向空 Key 默认方案时，自动兜底到其它可用方案。
+        const configs = resolveVoiceConfigCandidates(characterId);
+        if (configs.length === 0) throw new Error("还没有配置可用的语音方案");
+        let blob: Blob | null = null;
+        let lastError: unknown = null;
+        for (const vc of configs.slice(0, 3)) {
+            try {
+                blob = await synthesizeSpeech(speechText, vc);
+                if (blob) break;
+                lastError = new Error("语音服务没有返回音频数据");
+            } catch (error) {
+                lastError = error;
+            }
+        }
+        if (!blob) {
+            // 失败原因写进日志：以前这里统一抛「合成失败」，界面上看不出到底是
+            // 没绑方案、Key 无效、限流还是超时，完全没法排查。
+            const reason = lastError instanceof Error ? lastError.message : "未知原因";
+            console.warn("[TTS] 语音合成失败：", reason, { speechText });
+            throw new Error(reason);
+        }
         const dataUrl = await new Promise<string>((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = () => resolve(reader.result as string);
@@ -2627,6 +2650,8 @@ function VoiceMessageBubble({ msg, characterId, onUpdate, defaultTranslationExpa
     const [playing, setPlaying] = useState(false);
     const [synthesizing, setSynthesizing] = useState(false);
     const [synthFailed, setSynthFailed] = useState(false);
+    // 失败原因（没绑方案/Key 无效/限流/超时…），显示在悬浮提示里，便于排查
+    const [synthError, setSynthError] = useState("");
     const audioRef = useRef<HTMLAudioElement | null>(null);
     const mountedRef = useRef(true);
     useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
@@ -2675,6 +2700,7 @@ function VoiceMessageBubble({ msg, characterId, onUpdate, defaultTranslationExpa
         }
         setSynthesizing(true);
         setSynthFailed(false);
+        setSynthError("");
         synthesizeVoiceForMessage(msg.id, characterId, speechText)
             .then((dataUrl) => {
                 if (onUpdate) onUpdate({ ...msg, mediaUrl: dataUrl, mediaData: { ...msg.mediaData, synthesizedFromText: speechText } });
@@ -2682,10 +2708,11 @@ function VoiceMessageBubble({ msg, characterId, onUpdate, defaultTranslationExpa
                 setSynthesizing(false);
                 playSrc(dataUrl);
             })
-            .catch(() => {
+            .catch((error) => {
                 if (!mountedRef.current) return;
                 setSynthesizing(false);
                 setSynthFailed(true);
+                setSynthError(error instanceof Error ? error.message : "合成失败");
             });
     };
 
@@ -2723,7 +2750,7 @@ function VoiceMessageBubble({ msg, characterId, onUpdate, defaultTranslationExpa
                     />
                 ))}
             </div>
-            <span className="voice-msg-dur">{synthFailed ? "合成失败·点击重试" : `${duration}"`}</span>
+            <span className="voice-msg-dur" title={synthFailed && synthError ? synthError : undefined}>{synthFailed ? "合成失败·点击重试" : `${duration}"`}</span>
         </div>
     );
 }

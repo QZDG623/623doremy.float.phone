@@ -37,6 +37,12 @@ import java.util.concurrent.TimeUnit
  */
 class CallControlService : AccessibilityService() {
 
+    /**
+     * 应用守卫：关注应用一打开就拉回小手机、睡眠时段锁住应用。
+     * 配置由网页写入，进程重启后仍然生效（见 AppGuard）。
+     */
+    private val appGuard by lazy { AppGuard(this) }
+
     companion object {
         @Volatile
         var connected: Boolean = false
@@ -97,6 +103,8 @@ class CallControlService : AccessibilityService() {
         updateForegroundPackage(pkg)
         // 原有网页感知与其他壳功能继续收到前台应用变化事件。
         ShellBus.dispatchOverlayEvent("foregroundApp", JSONObject().put("package", pkg))
+        // 原生守卫：这一步不经过网页，切到别的 App 后也能立刻拦截。
+        appGuard.onForeground(pkg)
     }
 
     private fun updateForegroundPackage(pkg: String) {
@@ -336,6 +344,7 @@ class CallControlService : AccessibilityService() {
             for (i in 0 until old.length()) {
                 val item = old.optJSONObject(i) ?: continue
                 if (item.optString("id") != id) next.put(item)
+>>>>>>> /tmp/mf/theirs
             }
             prefs.edit().putString(QUEUE_KEY, next.toString()).apply()
         }

@@ -119,11 +119,18 @@ export async function simpleLLMCall(
             const anthropicMessages = messages
                 .filter(m => m.role !== "system")
                 .map(m => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content }));
-            const systemMsg = messages.find(m => m.role === "system");
+            // Anthropic 只接受一个 system 字段。此前只取第一条 system，
+            // 导致追加在消息末尾的「一次性事件提示」（看屏、查岗指导语）
+            // 被整段丢掉——角色看不到屏幕内容，只能顺着聊天自说自话。
+            const systemMsg = messages
+                .filter(m => m.role === "system")
+                .map(m => m.content)
+                .filter(Boolean)
+                .join("\n\n");
             body = JSON.stringify({
                 model: config.defaultModel,
                 messages: anthropicMessages,
-                ...(systemMsg ? { system: systemMsg.content } : {}),
+                ...(systemMsg ? { system: systemMsg } : {}),
                 temperature,
                 // Anthropic requires max_tokens. Keep this helper aligned with
                 // the main chat engine instead of silently capping output low.

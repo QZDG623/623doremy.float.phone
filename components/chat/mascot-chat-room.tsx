@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { AlertCircle, ChevronLeft, Code, Image as ImageIcon, MessageSquare, MoreHorizontal, RotateCcw, Sparkles, Trash2, UserRound } from "lucide-react";
+import { AlertCircle, ChevronLeft, Code, Image as ImageIcon, MessageSquare, MoreHorizontal, RotateCcw, Trash2, UserRound } from "lucide-react";
 import { PageShell } from "@/components/ui/page-shell";
 import { ConfirmDialog } from "@/components/ui/modal";
 import { MediaPreviewOverlay } from "@/components/chat/media-preview-overlay";
@@ -39,11 +39,10 @@ import {
 } from "@/lib/mascot-settings";
 import { resolveUserIdentity } from "@/lib/settings-storage";
 import type { UserIdentity } from "@/components/settings/user-identity";
-import { EmojiPanel } from "./emoji-panel";
+import { MascotComposer } from "./mascot-composer";
 import { BilingualTextBlock } from "./message-bubble";
 import { ChatFallbackAvatar } from "./chat-fallback-avatar";
 import { CHAT_APP_SETTINGS_UPDATED_EVENT, loadChatAppSettings } from "@/lib/chat-storage";
-import { shouldSendChatInputOnEnter } from "@/lib/chat-input-keyboard";
 import { useChatBottomReserve } from "./use-chat-bottom-reserve";
 
 type MascotChatRoomProps = {
@@ -460,7 +459,6 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
     const context = useSyncExternalStore(subscribeMascotContext, getMascotContext, getMascotContext);
     const [avatarUrl, setAvatarUrl] = useState(settings.avatarImage || DEFAULT_MASCOT_AVATAR);
     const [backgroundUrl, setBackgroundUrl] = useState("");
-    const [inputText, setInputText] = useState("");
     const [pendingImages, setPendingImages] = useState<string[]>([]);
     const [imagePreviewCache, setImagePreviewCache] = useState<Record<string, string>>({});
     const [showEmojiPanel, setShowEmojiPanel] = useState(false);
@@ -473,7 +471,6 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
     const [enterToSendEnabled, setEnterToSendEnabled] = useState(() => loadChatAppSettings().enterToSendEnabled === true);
     const wrapperRef = useRef<HTMLDivElement | null>(null);
     const scrollRef = useRef<HTMLDivElement | null>(null);
-    const textareaRef = useRef<HTMLTextAreaElement | null>(null);
     const bottomScrollTimersRef = useRef<number[]>([]);
     const loadMoreRestoreRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
     const stickToBottomRef = useRef(true);
@@ -665,35 +662,29 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
         }
     }, []);
 
-    const resizeTextarea = () => {
-        const ta = textareaRef.current;
-        if (!ta) return;
-        ta.style.height = "auto";
-        ta.style.height = Math.min(ta.scrollHeight, 120) + "px";
-    };
-
-    const appendEmoji = (emoji: string) => {
-        setInputText((prev) => prev + emoji);
-        requestAnimationFrame(() => {
-            resizeTextarea();
-            textareaRef.current?.focus();
-        });
-    };
-
-    const handleSend = async () => {
+    // 输入文字的状态已下沉到 MascotComposer：父组件只在提交/停止时收到回调，
+    // 打字不再触发整页重渲染。
+    const handleComposerSubmit = useCallback((text: string): boolean => {
         if (chat.isThinking) {
             stopMascotGeneration();
-            return;
+            return false;
         }
-        const text = inputText.trim();
-        if (!text && pendingImages.length === 0) return;
-        setInputText("");
-        textareaRef.current?.style.setProperty("height", "auto");
+        const trimmed = text.trim();
+        if (!trimmed && pendingImages.length === 0) return false;
         const images = pendingImages;
         setPendingImages([]);
         setShowEmojiPanel(false);
-        await sendMascotMessage({ text, images, context });
-    };
+        void sendMascotMessage({ text: trimmed, images, context });
+        return true;
+    }, [chat.isThinking, pendingImages, context]);
+
+    const handleComposerStop = useCallback(() => {
+        stopMascotGeneration();
+    }, []);
+
+    const handleRemovePendingImage = useCallback((index: number) => {
+        setPendingImages((prev) => prev.filter((_, i) => i !== index));
+    }, []);
 
     const handleGenerateReply = async () => {
         if (!canGenerateReply) return;
@@ -1107,111 +1098,21 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
                 <div style={{ overflowAnchor: "auto", height: 1 }} />
             </div>
 
-            <div className="chat-input-bar chat-room-main-pane flex flex-col" data-ui="input">
-                {pendingImages.length > 0 && (
-                    <div className="mascot-pending-strip">
-                        {pendingImages.map((ref, idx) => {
-                            const url = imagePreviewCache[ref];
-                            return (
-                                <div key={`${ref}-${idx}`} className="mascot-pending-thumb">
-                                    {url ? <img src={url} alt="" /> : null}
-                                    <button type="button" onClick={() => setPendingImages((prev) => prev.filter((_, i) => i !== idx))}>×</button>
-                                </div>
-                            );
-                        })}
-                    </div>
-                )}
-                <textarea
-                    ref={textareaRef}
-                    rows={1}
-                    value={inputText}
-                    onChange={(event) => {
-                        setInputText(event.target.value);
-                        resizeTextarea();
-                    }}
-                    onFocus={(event) => {
-                        if (showEmojiPanel) {
-                            event.target.blur();
-                            setShowEmojiPanel(false);
-                            const target = event.target;
-                            requestAnimationFrame(() => requestAnimationFrame(() => target.focus()));
-                        }
-                    }}
-                    onKeyDown={(event) => {
-                        if (shouldSendChatInputOnEnter(event, enterToSendEnabled)) {
-                            event.preventDefault();
-                            // 思考中回车吞掉：不发送，也不能落进 handleSend 的停止分支误停生成（停止只走按钮）
-                            if (chat.isThinking) return;
-                            void handleSend();
-                        }
-                    }}
-                    enterKeyHint={enterToSendEnabled ? "send" : "enter"}
-                    className="chat-input-textarea"
-                    placeholder={`跟${settings.nickname || "AI助手"}聊聊...`}
-                    /* 思考中不再 disable：禁用聚焦中的元素会强制失焦收键盘且不走正常 blur 事件序列，
-                       在 iOS PWA 上与键盘收起的 viewport 复原竞态，偶发把底部输入栏卡在屏幕外
-                       （表现为发送后整条输入栏消失，退出重进恢复）。对齐普通聊天室：生成中可继续打字，
-                       字留在框里；发送键在思考中仍是停止键。 */
-                />
-                <div className="chat-input-actions">
-                    <label
-                        className="ui-bare-btn text-[var(--c-text)]"
-                        aria-disabled={chat.isThinking || pendingImages.length >= 4}
-                        title={pendingImages.length >= 4 ? "最多 4 张图" : "添加图片"}
-                        onClick={(event) => {
-                            if (chat.isThinking || pendingImages.length >= 4) event.preventDefault();
-                        }}
-                    >
-                        <ImageIcon size={24} strokeWidth={1.5} />
-                        <input
-                            type="file"
-                            accept="image/*"
-                            multiple
-                            className="hidden"
-                            onChange={(event) => {
-                                const files = event.currentTarget.files ? Array.from(event.currentTarget.files) : [];
-                                event.currentTarget.value = "";
-                                void handlePickImages(files);
-                            }}
-                        />
-                    </label>
-                    <button
-                        type="button"
-                        onClick={() => setShowEmojiPanel((prev) => !prev)}
-                        className="ui-bare-btn text-[var(--c-text)]"
-                        aria-label="表情"
-                    >
-                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><path d="M8 14s1.5 2 4 2 4-2 4-2" /><line x1="9" y1="9" x2="9.01" y2="9" /><line x1="15" y1="9" x2="15.01" y2="9" /></svg>
-                    </button>
-                    <button
-                        type="button"
-                        onClick={() => void handleSend()}
-                        disabled={!chat.isThinking && !inputText.trim() && pendingImages.length === 0}
-                        className="ui-bare-btn text-[var(--c-text)]"
-                        aria-label={chat.isThinking ? "停止生成" : "发送"}
-                    >
-                        {chat.isThinking ? (
-                            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                                <circle cx="12" cy="12" r="10" />
-                                <rect x="9" y="9" width="6" height="6" rx="1" />
-                            </svg>
-                        ) : (
-                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
-                        )}
-                    </button>
-                    <button
-                        type="button"
-                        onClick={() => void handleGenerateReply()}
-                        disabled={!canGenerateReply}
-                        className="ui-bare-btn text-[var(--c-text)]"
-                        aria-label="重新生成回复"
-                        title="生成回复（发送后未生成或删除回复后使用）"
-                    >
-                        <Sparkles size={24} strokeWidth={1.5} />
-                    </button>
-                </div>
-                {showEmojiPanel && <EmojiPanel onSelect={appendEmoji} />}
-            </div>
+            <MascotComposer
+                isThinking={chat.isThinking}
+                pendingImages={pendingImages}
+                imagePreviewCache={imagePreviewCache}
+                enterToSendEnabled={enterToSendEnabled}
+                emojiOpen={showEmojiPanel}
+                onEmojiOpenChange={setShowEmojiPanel}
+                onPickImages={handlePickImages}
+                onRemovePendingImage={handleRemovePendingImage}
+                onSubmit={handleComposerSubmit}
+                onStop={handleComposerStop}
+                canGenerateReply={canGenerateReply}
+                onGenerateReply={() => void handleGenerateReply()}
+                placeholder={`跟${settings.nickname || "AI助手"}聊聊...`}
+            />
 
             {showInfo && wrapperRef.current?.parentElement && createPortal(
                 <div className="chat-settings-layer absolute inset-0 z-50">

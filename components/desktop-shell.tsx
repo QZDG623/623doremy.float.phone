@@ -26,6 +26,8 @@ import "@/lib/qa-error-log";
 import { RealityBridgeApp } from "@/components/reality-bridge-app";
 import { REALITY_BRIDGE_APP_EVENT_NAME, REALITY_BRIDGE_DATA_EVENT } from "@/lib/reality-bridge/types";
 import { DiaryApp } from "@/components/diary/diary-app";
+import { ArchiveApp } from "@/components/archive/archive-app";
+import { SleepRadioApp } from "@/components/sleep-radio/sleep-radio-app";
 import { XiaohongshuApp } from "@/components/xiaohongshu/xiaohongshu-app";
 import { StoryApp } from "@/components/story/story-app";
 import { LifeEngineApp } from "@/components/life/life-engine-app";
@@ -135,7 +137,7 @@ import { WidgetRenderer } from "@/components/widgets/widget-renderer";
 import type { DIYWidgetTemplate } from "@/lib/widget-types";
 import { DebugPromptPanel } from "@/components/debug-prompt-panel";
 import { QuickActionFloat } from "@/components/quick-action-float";
-import { CHAT_MESSAGE_PUSHED_EVENT, CHAT_REQUEST_REPLY_EVENT, findChatSessionById, hydrateChatStorage, loadChatSessions, loadChatMessages, pushChatMessage, type ChatMessage, type ChatSession } from "@/lib/chat-storage";
+import { CHAT_MESSAGE_PUSHED_EVENT, CHAT_REQUEST_REPLY_EVENT, CHAT_STORAGE_HYDRATION_FAILED_EVENT, CHAT_STORAGE_RESTORED_EVENT, findChatSessionById, hydrateChatStorage, loadChatSessions, loadChatMessages, pushChatMessage, type ChatMessage, type ChatSession } from "@/lib/chat-storage";
 import { ensureGlobalBindingDefaults, resolveUserIdentity } from "@/lib/settings-storage";
 import { loadCharacters } from "@/lib/character-storage";
 import { generateChatCompletion, flattenCompletionResult } from "@/lib/chat-engine";
@@ -1276,6 +1278,35 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   useEffect(() => {
     activeAppRef.current = activeApp;
   }, [activeApp]);
+
+  /**
+   * 侧滑/返回键：由安卓壳主动调用（见 MainActivity.handleBackPress）。
+   *
+   * 为什么放在网页做：网页的「导航栈」是 activeApp 这个 state，WebView 的
+   * canGoBack() 永远是 false（整个小手机只有一个 URL）。以前壳只问 canGoBack，
+   * 于是一侧滑就直接退到系统桌面。现在壳先问网页，网页按「先关当前 App、
+   * 再回桌面」的顺序处理，返回 true 表示已消化；返回 false 壳才退出。
+   *
+   * 同时派发一个可取消的 float:back 事件：某个 App 内部还有二级/三级页面
+   * （比如设置里的子面板）时，它可以自己 preventDefault 去关子页面，
+   * 不必改这个文件。
+   */
+  useEffect(() => {
+    const handler = (): boolean => {
+      const event = new CustomEvent("float:back", { cancelable: true });
+      if (!window.dispatchEvent(event)) return true;
+      if (activeAppRef.current) {
+        setActiveApp(null);
+        return true;
+      }
+      return false;
+    };
+    (window as unknown as { __floatHandleBack?: () => boolean }).__floatHandleBack = handler;
+    return () => {
+      const w = window as unknown as { __floatHandleBack?: () => boolean };
+      if (w.__floatHandleBack === handler) delete w.__floatHandleBack;
+    };
+  }, []);
   // Listen for theme CSS updates from 小卷
   useEffect(() => {
     const onThemeUpdate = () => {
@@ -1306,6 +1337,35 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
     return () => {
       window.removeEventListener("theme-css-updated", onThemeUpdate);
       window.removeEventListener("message", onIframeMessage);
+    };
+  }, []);
+
+  // 本地聊天库异常必须让用户看见：IndexedDB 被系统逐出/占用时，此前是静默空库，
+  // 表现就是「重进后聊天记录全没了」。这里显式提示并自动重试一次；
+  // 从每日快照恢复成功也告知，避免数据「自己回来」让人困惑。
+  useEffect(() => {
+    let retryTimer: number | null = null;
+    const onHydrationFailed = () => {
+      setNotice("聊天数据库读取失败，已暂停覆盖写入，正在自动重试…");
+      if (retryTimer !== null) return;
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        void hydrateChatStorage()
+          .then(() => setNotice("聊天数据库已恢复"))
+          .catch(() => setNotice("聊天数据库仍无法读取：请勿清缓存，可用云端备份恢复"));
+      }, 2500);
+    };
+    const onRestored = (event: Event) => {
+      const detail = (event as CustomEvent<{ snapshotAt?: string; messages?: number }>).detail;
+      const at = detail?.snapshotAt ? new Date(detail.snapshotAt).toLocaleString("zh-CN") : "";
+      setNotice(`上次异常退出，已从本地快照恢复${at ? `（${at}）` : ""}，共 ${detail?.messages || 0} 条消息`);
+    };
+    window.addEventListener(CHAT_STORAGE_HYDRATION_FAILED_EVENT, onHydrationFailed);
+    window.addEventListener(CHAT_STORAGE_RESTORED_EVENT, onRestored as EventListener);
+    return () => {
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      window.removeEventListener(CHAT_STORAGE_HYDRATION_FAILED_EVENT, onHydrationFailed);
+      window.removeEventListener(CHAT_STORAGE_RESTORED_EVENT, onRestored as EventListener);
     };
   }, []);
 
@@ -4460,6 +4520,14 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
 
     if (activeApp === "diary") {
       return <DiaryApp onClose={() => setActiveApp(null)} onNotice={setNotice} />;
+    }
+
+    if (activeApp === "favorites") {
+      return <ArchiveApp onClose={() => setActiveApp(null)} />;
+    }
+
+    if (activeApp === "sleep_radio") {
+      return <SleepRadioApp onClose={() => setActiveApp(null)} />;
     }
 
     if (activeApp === "xiaohongshu") {

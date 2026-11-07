@@ -1253,7 +1253,8 @@ async function buildLocalReplyItemsFromSegment(segment, runtime) {
   const before = value.slice(0, media.index).trim();
   const after = value.slice(media.index + media.raw.length).trim();
   if (before) out.push(...await buildLocalReplyItemsFromSegment(before, runtime));
-  out.push(await buildLocalMediaReplyItem(media, runtime));
+  const mediaItem = await buildLocalMediaReplyItem(media, runtime);
+  if (mediaItem) out.push(mediaItem);
   if (after) out.push(...await buildLocalReplyItemsFromSegment(after, runtime));
   return out;
 }
@@ -1282,9 +1283,9 @@ const LOCAL_MEDIA_PROTOCOLS = [
   { kind: "transfer", regex: /\[转账\s*[：:]\s*\d+(?:\.\d+)?\s*[：:][^\]]*\]/ },
   { kind: "location", regex: /\[位置\s*[：:]\s*([^\]]+)\]/ },
   { kind: "music", regex: /\[音乐(?:分享)?\s*[：:]\s*([^\]]+)\]/ },
-  { kind: "voice", regex: /\[语音条\s*[：:]\s*([^\]]+)\]/ },
-  { kind: "sticker", regex: /\[表情包\s*[：:]\s*([^\]]+)\]/ },
-  { kind: "photo", regex: /\[照片\s*[：:]\s*(?:(使用参考图|不使用参考图)\s*[：:]\s*)?([^\]]+)\]/ },
+  { kind: "voice", regex: /\[语音条\s*[：:]\s*([^\]]+?)(?:\]|$)/ },
+  { kind: "sticker", regex: /\[表情包\s*[：:]\s*([^\]]+?)(?:\]|$)/ },
+  { kind: "photo", regex: /\[照片\s*[：:]\s*(?:(使用参考图|不使用参考图)\s*[：:]\s*)?([^\]]+?)(?:\]|$)/ },
 ];
 
 function findFirstLocalMediaProtocol(text) {
@@ -1311,9 +1312,9 @@ function findFirstLocalMediaProtocol(text) {
 async function buildLocalMediaReplyItem(media, runtime) {
   if (media.kind === "sticker") {
     const stickerImage = resolveRuntimeStickerImage(runtime, media.label);
-    if (stickerImage) {
-      return { kind: "image", imageDataUrl: stickerImage, label: media.raw };
-    }
+    // 拿不到真实表情图片就不发：模板占位图在微信里只会显示成一张加载失败的图片。
+    if (!stickerImage) return null;
+    return { kind: "image", imageDataUrl: stickerImage, label: media.raw };
   }
   if (media.kind === "photo") {
     const generatedImage = await generateLocalImageReplyDataUrl(media, runtime).catch((err) => {
@@ -1327,12 +1328,12 @@ async function buildLocalMediaReplyItem(media, runtime) {
   if (media.kind === "voice") {
     const transcript = cleanVoiceTranscript(media.label);
     const duration = estimateVoiceDuration(transcript);
-    const fallbackImageDataUrl = getTemplateImageDataUrl("voice");
     const audioDataUrl = await synthesizeVoiceDataUrl(transcript, runtime?.voiceConfig).catch(() => "");
     if (audioDataUrl) {
-      return { kind: "voice", audioDataUrl, transcript, duration, fallbackImageDataUrl };
+      // 发送失败也不再降级成绿色语音模板图（微信里只是一张不能播放的图片）。
+      return { kind: "voice", audioDataUrl, transcript, duration, fallbackImageDataUrl: null };
     }
-    return { kind: "image", imageDataUrl: fallbackImageDataUrl, label: media.raw };
+    return null;
   }
   return {
     kind: "image",
@@ -1541,7 +1542,13 @@ function cleanVoiceTranscript(text) {
     .split(/\n+/)
     .map(line => {
       const bar = line.indexOf("|");
-      return (bar >= 0 ? line.slice(0, bar) : line).trim();
+      const spoken = bar >= 0 ? line.slice(0, bar) : line;
+      // 去掉角色括号里的拟声词与 <#0.5#> 停顿标记：有的 TTS 会把这些念出来，听感像内容残缺。
+      return spoken
+        .replace(/<\s*#[^>]*#\s*>/g, "")
+        .replace(/[（(]\s*(?:breath|sigh|laugh|laughs|chuckle|sniff|cough|whisper|pause|exhale|inhale)\s*[）)]/gi, "")
+        .replace(/\s{2,}/g, " ")
+        .trim();
     })
     .filter(Boolean)
     .join("\n")
@@ -1559,7 +1566,9 @@ const IMAGE_GENERATION_TIMEOUT_MS = 90_000;
 
 async function synthesizeVoiceDataUrl(text, voiceConfig) {
   const cleanText = String(text || "").trim();
-  if (!cleanText || !voiceConfig || voiceConfig.enableTTS !== true) return "";
+  // 只在明确关闭 TTS 时跳过；同步端传进来的已经是可用候选方案，
+  // 不能再要求 enableTTS === true，否则缺省该字段的方案会被误判成禁用而发绿卡。
+  if (!cleanText || !voiceConfig || voiceConfig.enableTTS === false) return "";
   // 预算不足时跳过 TTS（外层降级为语音模板卡），保证整轮在墙钟内完成；
   // 实际请求超时同样按剩余预算收紧（预留 15s 给上传发送），避免擦到墙钟。
   const budget = remainingReplyBudgetMs();
@@ -1792,7 +1801,7 @@ async function sendIlinkVoiceMessage(botToken, raw, audioDataUrl, duration) {
         type: 4,
         file_item: {
           media: { encrypt_query_param: upload.downloadParam, aes_key: encodeMessageAesKey(upload.aeskey), encrypt_type: 1 },
-          file_name: "voice.mp3",
+          file_name: "语音条.mp3",
           file_size: audio.length,
           file_ext: "mp3",
           duration: Number(duration) || undefined,

@@ -168,7 +168,7 @@ const RICH_PATTERNS: {
         }),
     },
     {
-        regex: new RegExp(`\\[照片${C}(使用参考图|不使用参考图)${C}([^\\]]+)\\]`),
+        regex: new RegExp(`\\[照片${C}(使用参考图|不使用参考图)${C}([^\\]]+?)(?:\\]|$)`),
         build: (m) => ({
             content: "",
             mediaType: "image",
@@ -180,7 +180,7 @@ const RICH_PATTERNS: {
         }),
     },
     {
-        regex: new RegExp(`\\[照片${C}([^\\]]+)\\]`),
+        regex: new RegExp(`\\[照片${C}([^\\]]+?)(?:\\]|$)`),
         build: (m) => {
             const label = m[1].trim();
             return {
@@ -212,7 +212,7 @@ const RICH_PATTERNS: {
         }),
     },
     {
-        regex: new RegExp(`\\[表情包${C}([^\\]]+)\\]`),
+        regex: new RegExp(`\\[表情包${C}([^\\]]+?)(?:\\]|$)`),
         build: (m) => {
             const name = m[1].trim();
             return {
@@ -258,8 +258,8 @@ const RICH_PATTERNS: {
         },
     },
     {
-        // [语音条:文字内容] — voice message
-        regex: new RegExp(`\\[语音条${C}([^\\]]+)\\]`),
+        // [语音条:文字内容] — voice message（生成被截断、缺少右括号时也按语音处理）
+        regex: new RegExp(`\\[语音条${C}([^\\]]+?)(?:\\]|$)`),
         build: (m) => ({
             content: "",
             mediaType: "audio" as const,
@@ -281,6 +281,23 @@ const RICH_PATTERNS: {
             content: "他想邀请你见面，是否同意？",
             mediaType: "meeting_invite" as const,
             mediaData: { meetingInviteStatus: "pending" as const },
+        }),
+    },
+    {
+        // 角色非常渴望见面时强制开启线下剧情。标记由聊天页消费，不落库展示。
+        regex: new RegExp(`\\[开启线下剧情${C}([^\\]]+)\\]`),
+        build: (m) => ({
+            content: "",
+            mediaType: "force_offline_story" as const,
+            mediaData: { forceStoryTitle: m[1].trim() },
+        }),
+    },
+    {
+        regex: /\[开启线下剧情\]/,
+        build: () => ({
+            content: "",
+            mediaType: "force_offline_story" as const,
+            mediaData: {},
         }),
     },
     // 群聊带主语宾语的格式（优先匹配）

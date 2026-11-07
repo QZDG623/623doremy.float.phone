@@ -10,6 +10,7 @@ import { storeMediaBase64 } from "@/lib/media-cache-storage";
 import { ChatSession, ChatMessage, CHAT_APP_SETTINGS_UPDATED_EVENT, CHAT_INITIAL_VISIBLE_MESSAGE_COUNT, CHAT_LOAD_MORE_MESSAGE_COUNT, CHAT_REQUEST_REPLY_EVENT, loadChatAppSettings, loadChatMessages, loadChatSessions, saveChatSessions, pushChatMessage, updateChatMessage, deleteChatMessage, deleteChatMessagesFrom, deleteChatMessagesByIds, retractChatMessage, editChatMessage, updateMessageMediaData, replaceResponseBatchWithParts, replaceGroupResponseRound, isReadingDiscussMessage, isSystemInstructionMessage, getSystemInstructionDisplayContent, createResponseBatchId, createResponseRoundId, getLatestStateValues, getLatestCharacterStateValues, compareChatMessages, isSessionStreamingEnabled, resolveChatBackgroundImage, resolveChatUserAvatar, resolveSessionCharacterId } from "@/lib/chat-storage";
 import { cleanStreamText, splitStreamPreviewSegments, stripLiteralTexts, stripXmlTagBlocks } from "@/lib/stream-preview";
 import type { StateValue } from "@/lib/chat-storage";
+import { addArchiveEntry, archiveVoiceMessage } from "@/lib/archive-storage";
 import { parseStateValues, mergeStateValues } from "@/lib/state-value-parser";
 import { parseAIResponse, type ParsedMessagePart } from "@/lib/rich-message-parser";
 import { isKnownStickerLabel } from "@/lib/sticker-data";
@@ -1904,15 +1905,15 @@ export function ChatRoom({ session, onBack, onDeleted, isActive = true }: ChatRo
         });
     }, [activeRegexes, displayRegexMacroEngine, getRegexActiveTags]);
 
-    // 「丢弃角色输出的无效表情包」开关：滤除名称不在角色表情包/内置表情中的 sticker part
+    // 角色输出的表情包必须真实可用：名称不在角色表情包/内置表情中的 sticker part 一律丢弃，
+    // 否则会显示成 `[表情包名]` 文字（已删除的表情包也会以文字形式漏出来）。
     const stripInvalidStickerParts = useCallback((parts: ParsedMessagePart[], senderCharacterId?: string): ParsedMessagePart[] => {
-        if (session.discardInvalidStickers !== true) return parts;
         const characterIds = senderCharacterId
             ? [senderCharacterId]
             : (session.isGroup ? (session.participantIds ?? []) : (resolveSessionCharacterId(session) ? [resolveSessionCharacterId(session)!] : []));
         return parts.filter(part => part.mediaType !== "sticker"
             || isKnownStickerLabel(part.mediaData?.label || "", characterIds));
-    }, [session.discardInvalidStickers, session.isGroup, session.participantIds, session.contactId]);
+    }, [session.isGroup, session.participantIds, session.contactId]);
 
     const normalizeDisplayParts = useCallback((parts: ReturnType<typeof parseAIResponse>["parts"]) => {
         const charN = character?.name || "对方";
@@ -3120,6 +3121,7 @@ export function ChatRoom({ session, onBack, onDeleted, isActive = true }: ChatRo
 
         // Detect call triggers and AI media actions, filter them out
         let triggerCall: "voice" | "video" | undefined;
+        let forceStoryTitle: string | undefined;
         let hasDecline = false;
         const charN = character?.name || "对方";
         const userN = userIdentity?.name || "你";
@@ -3146,6 +3148,13 @@ export function ChatRoom({ session, onBack, onDeleted, isActive = true }: ChatRo
                         meetingInviteCharacterName: charN,
                     },
                 });
+                continue;
+            }
+            if (p.mediaType === "force_offline_story") {
+                // 由私聊角色主动推进的线下剧情：标记不展示，处理为创建分线并进入剧情。
+                if (!session.isGroup && session.allowForcedOfflineStory !== false) {
+                    forceStoryTitle = p.mediaData?.forceStoryTitle?.trim() || "";
+                }
                 continue;
             }
             if (p.mediaType === "accept_red_packet" || p.mediaType === "decline_red_packet"
@@ -3314,8 +3323,50 @@ export function ChatRoom({ session, onBack, onDeleted, isActive = true }: ChatRo
             await Promise.allSettled(imageReplacementTasks);
             throwIfGenerationStopped(options);
         }
+        if (forceStoryTitle !== undefined) {
+            await openOfflineStoryBranch({
+                title: forceStoryTitle,
+                launchPrompt: `${charN}非常渴望见面并主动开启了这次线下剧情。${forceStoryTitle ? `本次分线：${forceStoryTitle}。` : ""}请由${charN}承接刚才私聊的语境自然开始见面剧情。`,
+            }).catch(error => {
+                showChatToast(error instanceof Error ? error.message : "开启线下剧情失败，请稍后再试");
+            });
+        }
         return { hasVisible: true, stateValues, triggerCall, hasDecline };
     };
+
+    async function openOfflineStoryBranch(params: { title?: string; launchPrompt: string }) {
+        await hydrateStoryStorage();
+        const characterId = session.contactId;
+        const mainSession = loadStorySessionsForOwner("single", characterId)
+            .find((item) => (item.branchId || "main") === "main")
+            || createOrGetStorySession(characterId, { ownerType: "single", ownerId: characterId, branchId: "main" });
+        const now = new Date();
+        const fallbackTitle = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日 ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+        const branchName = params.title?.trim() || fallbackTitle;
+        const storySession = createOrGetStorySession(characterId, {
+            ownerType: "single",
+            ownerId: characterId,
+            participantIds: [characterId],
+            branchId: `invite_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            branchName,
+            inheritRecentMemory: true,
+            independentStory: false,
+            baseSession: mainSession,
+        });
+        const resolvedAt = new Date().toISOString();
+        const launchPrompt = params.launchPrompt;
+        updateStorySession(storySession.id, {
+            autoStartPrompt: launchPrompt,
+            autoStartRequestedAt: resolvedAt,
+        });
+        saveStoryLaunchTarget({
+            ...storySession,
+            autoStartPrompt: launchPrompt,
+            autoStartRequestedAt: resolvedAt,
+        });
+        window.dispatchEvent(new CustomEvent("open-app", { detail: { appId: "story" } }));
+        return storySession;
+    }
 
     // Helper: handle AI-triggered call from splitAndSaveAIMessages result
     const handleCallTrigger = (triggerCall?: "voice" | "video") => {
@@ -5448,6 +5499,62 @@ export function ChatRoom({ session, onBack, onDeleted, isActive = true }: ChatRo
         showChatToast(marking ? "已标记为通话开头" : "已取消通话开头标记");
     }, [session.id, syncMessagesFromStorage]);
 
+    /**
+     * 收藏一条聊天记录 / 语音 / 图片到收藏夹。
+     *
+     * 存的是**快照**（正文、媒体地址、角色信息），所以原消息后来被删或编辑，
+     * 收藏依然完整。语音与图片如果连正文都没有，用一句占位让档案里不出现空白。
+     */
+    const handleArchiveMessage = (m: ChatMessage) => {
+        const kind = m.mediaType === "audio" ? "voice" : m.mediaType === "image" ? "image" : "chat";
+        const rawText = m.mediaType === "audio" || m.mediaType === "image"
+            ? (m.mediaData?.label || m.content || "").trim()
+            : m.content;
+        const text = rawText || (kind === "voice" ? "[语音]" : kind === "image" ? "[图片]" : "");
+        if (!text) return;
+        const storedId = getStoredActionMessageId(m);
+
+        // 语音要额外把音频本体存下来（没有现成音频就按台词合成一次），
+        // 这样收藏夹里能反复播放，而不是只剩一行转写。
+        if (kind === "voice") {
+            setActiveMessageId(null);
+            showChatToast(m.mediaUrl ? "正在保存这条语音…" : "正在合成并收藏这条语音…");
+            void archiveVoiceMessage({
+                characterId: session.contactId,
+                characterName: character?.name || session.alias || "角色",
+                characterAvatar: character?.avatar || undefined,
+                sourceId: storedId,
+                sessionId: session.id,
+                text,
+                mediaUrl: m.mediaUrl,
+                createdAt: m.createdAt,
+            }).then(result => {
+                if (result.status === "exists") {
+                    showChatToast(result.playable ? "这条已经在收藏夹里了" : "这条已收藏，但音频合成失败");
+                } else if (result.playable) showChatToast("已收藏这条语音，可在收藏夹里重复播放");
+                else showChatToast("已收藏语音文字，但音频合成失败");
+            }).catch(() => showChatToast("收藏语音失败，请稍后再试"));
+            return;
+        }
+
+        const added = addArchiveEntry({
+            kind,
+            characterId: session.contactId,
+            characterName: character?.name || session.alias || "角色",
+            characterAvatar: character?.avatar || undefined,
+            sourceId: storedId,
+            sessionId: session.id,
+            text,
+            mediaUrl: m.mediaUrl,
+            createdAt: m.createdAt,
+            auto: false,
+        });
+        showChatToast(added
+            ? (kind === "image" ? "已收藏这张图" : "已收藏这条聊天记录")
+            : "这条已经在收藏夹里了");
+        setActiveMessageId(null);
+    };
+
     /** Reusable context menu for user/assistant bubbles */
     const renderBubbleContextMenu = (m: ChatMessage, options?: { allowMultiSelect?: boolean }) => {
         const storedMessageId = getStoredActionMessageId(m);
@@ -5499,6 +5606,7 @@ export function ChatRoom({ session, onBack, onDeleted, isActive = true }: ChatRo
                 </div>
                 <div className="flex">
                     <button onClick={() => { setQuotingMessage(m); setActiveMessageId(null); }} className="ctx-menu-btn">引用</button>
+                    <button onClick={() => handleArchiveMessage(m)} className="ctx-menu-btn">收藏</button>
                     {options?.allowMultiSelect !== false && (
                         <button onClick={() => startMultiSelectFromMessage(m)} className="ctx-menu-btn">多选</button>
                     )}

@@ -1,12 +1,25 @@
 package app.floatphone.shell
 
 import android.accessibilityservice.AccessibilityService
+import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Color
+import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Base64
+import android.util.TypedValue
 import android.view.Display
+import android.view.Gravity
+import android.view.View
+import android.view.WindowManager
+import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.TextView
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.util.ArrayDeque
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -77,6 +90,10 @@ object ScreenshotBridge {
         .put("supported", Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
         .put("accessibilityOn", service != null)
         .put("ready", canCapture())
+        // 读整屏文字与字幕气泡都依赖无障碍实例，但不需要 API 30 的 takeScreenshot——
+        // 所以单独报，别让用户以为「系统版本不够」就连读屏也不能用。
+        .put("screenText", Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP)
+        .put("subtitle", Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && service != null)
         .toString()
 
     // ── 诊断留痕 ────────────────────────────────────────────
@@ -272,6 +289,252 @@ object ScreenshotBridge {
         AccessibilityService.ERROR_TAKE_SCREENSHOT_INVALID_DISPLAY ->
             "屏幕不可用（可能正处在息屏或投屏切换中）"
         else -> "截屏失败（错误码 $errorCode）"
+    }
+
+    /**
+     * 读当前屏幕上的文字（不截图）。
+     *
+     * 为什么需要它：截图给视觉模型既慢又贵，且画面里的文字常常读不清（小字、
+     * 深色背景）。无障碍能直接拿到界面上的文本节点，对「角色知道你正在看什么」
+     * 这件事更准也更省。只在无障碍已授权时可用，读不到就如实说原因。
+     *
+     * 只读**当前活动窗口**的文本，不读剪贴板、不读输入框内容；最多回 3000 字，
+     * 避免把一整页长文塞进模型请求。内容只交回网页，原生不落盘、不外传。
+     */
+    fun readScreenText(): String {
+        val svc = service
+            ?: return failText("无障碍服务没有开启")
+        return try {
+            val root = svc.rootInActiveWindow
+                ?: return failText("读不到当前窗口")
+            val builder = StringBuilder()
+            val queue = ArrayDeque<AccessibilityNodeInfo>()
+            queue.add(root)
+            var visited = 0
+            while (queue.isNotEmpty() && builder.length < MAX_TEXT_LENGTH && visited < MAX_NODES) {
+                val node = queue.pollFirst() ?: continue
+                visited += 1
+                val text = node.text?.toString()?.trim().orEmpty()
+                val desc = node.contentDescription?.toString()?.trim().orEmpty()
+                val line = text.ifEmpty { desc }
+                if (line.isNotEmpty() && !builder.contains(line)) {
+                    if (builder.isNotEmpty()) builder.append('\n')
+                    builder.append(line.take(MAX_TEXT_LENGTH - builder.length))
+                }
+                for (index in 0 until node.childCount) {
+                    node.getChild(index)?.let { queue.add(it) }
+                }
+            }
+            JSONObject()
+                .put("available", true)
+                .put("package", root.packageName?.toString().orEmpty())
+                .put("text", builder.toString().trim())
+                .toString()
+        } catch (e: Throwable) {
+            failText(e.message ?: "读取屏幕文字失败")
+        }
+    }
+
+    private fun failText(reason: String): String =
+        JSONObject().put("available", false).put("reason", reason).toString()
+
+    /** 读屏文字的采集上限：节点数与总字数。 */
+    private const val MAX_NODES = 400
+    private const val MAX_TEXT_LENGTH = 3000
+
+    // ── 字幕气泡 ────────────────────────────────────────────
+    //
+    // 用 TYPE_ACCESSIBILITY_OVERLAY（无障碍服务专属窗口类型），不需要
+    // 「显示在其他应用上层」权限，也不会抢占触摸——它就是一条只能看的气泡。
+    // 与查岗浮层不同：这里刻意不可交互，避免在别人 App 上误触。
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private var subtitleView: TextView? = null
+    private var hideSubtitleRunnable: Runnable? = null
+
+    private fun dp(value: Int): Int {
+        val metrics = service?.resources?.displayMetrics ?: return value
+        return TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value.toFloat(), metrics).toInt()
+    }
+
+    /**
+     * 显示一条字幕气泡。durationMs <= 0 表示常驻，直到 hideSubtitle()。
+     *
+     * 位置规则：**贴在悬浮球旁边**（球在上半屏就放球下方、下半屏放球上方，
+     * 球的水平中心偏右就把气泡放左边，反之放右边），并垂直居中于球。
+     * 球不显示时才退回固定的顶部居中——这时没有参照物，固定位置最稳。
+     *
+     * @return 是否已交给主线程去挂窗口（服务没开时直接 false）。
+     */
+    fun showSubtitle(text: String, durationMs: Int): Boolean {
+        if (text.isBlank()) return false
+        val svc = service ?: return false
+        mainHandler.post {
+            try {
+                val existing = subtitleView
+                if (existing != null) {
+                    existing.text = text
+                    // 换句后宽度会变：重新量一次并贴回球旁边，否则气泡会飘在半空
+                    repositionSubtitle(svc, existing)
+                    scheduleHide(durationMs)
+                    return@post
+                }
+                val view = TextView(svc).apply {
+                    this.text = text
+                    setTextColor(Color.WHITE)
+                    textSize = 14f
+                    maxLines = 4
+                    gravity = Gravity.CENTER
+                    setPadding(dp(14), dp(9), dp(14), dp(9))
+                    background = GradientDrawable().apply {
+                        cornerRadius = dp(18).toFloat()
+                        setColor(0xE6202028.toInt())
+                    }
+                    elevation = dp(6).toFloat()
+                }
+                val params = buildSubtitleParams(svc, view)
+                val wm = svc.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                wm.addView(view, params)
+                subtitleView = view
+                scheduleHide(durationMs)
+            } catch (e: Throwable) {
+                // 挂不上就静默放弃：气泡是锦上添花，不能因此把聊天链路搞坏
+            }
+        }
+        return true
+    }
+
+    /**
+     * 计算气泡的窗口参数：优先贴球，拿不到球的位置再退回顶部居中。
+     *
+     * 之所以要 view.measure()：WRAP_CONTENT 的宽度只有量过才知道，
+     * 而「放在球左边还是右边」必须知道气泡自己多宽才不越界。
+     */
+    private fun buildSubtitleParams(
+        svc: AccessibilityService,
+        view: TextView,
+    ): WindowManager.LayoutParams {
+        val metrics = svc.resources.displayMetrics
+        val maxWidth = (metrics.widthPixels * 0.86f).toInt()
+        view.maxWidth = maxWidth
+        view.measure(
+            View.MeasureSpec.makeMeasureSpec(maxWidth, View.MeasureSpec.AT_MOST),
+            View.MeasureSpec.makeMeasureSpec(metrics.heightPixels, View.MeasureSpec.AT_MOST),
+        )
+        val width = view.measuredWidth.coerceAtLeast(1)
+        val height = view.measuredHeight.coerceAtLeast(1)
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT,
+        )
+
+        val ball = runCatching { ScreenshotBallService.ballSnapshot() }.getOrNull()
+        if (ball != null) {
+            val ballX = ball.optInt("x", 0)
+            val ballY = ball.optInt("y", 0)
+            val ballD = ball.optInt("diameter", 0)
+            val screenW = ball.optInt("screenW", metrics.widthPixels)
+            val screenH = ball.optInt("screenH", metrics.heightPixels)
+            val gap = dp(10)
+            val margin = dp(8)
+
+            // 水平：球偏右 → 气泡放球左边；球偏左 → 放球右边。
+            // 两边都放不下时（球太大/气泡太宽），退而求其次夹在屏幕内。
+            val leftSide = ballX + ballD / 2 > screenW / 2
+            val rawX = if (leftSide) ballX - width - gap else ballX + ballD + gap
+            val x = rawX.coerceIn(margin, maxOf(margin, screenW - width - margin))
+            // 垂直：与球的中线对齐，再夹在屏幕内。
+            val rawY = ballY + (ballD - height) / 2
+            val y = rawY.coerceIn(margin, maxOf(margin, screenH - height - margin))
+
+            params.gravity = Gravity.TOP or Gravity.START
+            params.x = x
+            params.y = y
+        } else {
+            params.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            params.x = 0
+            params.y = dp(92)
+        }
+        return params
+    }
+
+    /** 球移动后把正在显示的气泡跟着挪过去。 */
+    fun onBallMoved() {
+        mainHandler.post {
+            val view = subtitleView ?: return@post
+            val svc = service ?: return@post
+            repositionSubtitle(svc, view)
+        }
+    }
+
+    private fun repositionSubtitle(svc: AccessibilityService, view: TextView) {
+        runCatching {
+            val wm = svc.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            wm.updateViewLayout(view, buildSubtitleParams(svc, view))
+        }
+    }
+
+    private fun scheduleHide(durationMs: Int) {
+        hideSubtitleRunnable?.let { mainHandler.removeCallbacks(it) }
+        if (durationMs <= 0) return
+        val task = Runnable { hideSubtitle() }
+        hideSubtitleRunnable = task
+        mainHandler.postDelayed(task, durationMs.toLong())
+    }
+
+    /** 收起字幕气泡。幂等。 */
+    fun hideSubtitle() {
+        mainHandler.post {
+            val view = subtitleView ?: return@post
+            try {
+                val wm = service?.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+                wm?.removeView(view)
+            } catch (e: Throwable) {
+                // 已经不在窗口上（服务断开时系统自动移除）→ 忽略
+            }
+            subtitleView = null
+        }
+    }
+
+    // ── 自主看屏节拍 ────────────────────────────────────────
+    //
+    // 网页在后台时 JS 定时器可能被系统冻结；把「多久看一次」交给原生主线程
+    // Handler，到点直接往网页推一条 screen-tick 事件。是否真要生成、
+    // 几轮之后停、字幕显示多久，全部还是由网页决定（原生不替网页判断）。
+
+    private var tickerSeconds: Int = 0
+
+    private val tickerRunnable = object : Runnable {
+        override fun run() {
+            val seconds = tickerSeconds
+            if (seconds <= 0) return
+            ShellBus.dispatchOverlayEvent("screen-tick", JSONObject())
+            mainHandler.postDelayed(this, seconds * 1000L)
+        }
+    }
+
+    /** 开始（或改间隔）自主看屏节拍。seconds <= 0 等价于停止。 */
+    fun startTicker(seconds: Int) {
+        mainHandler.post {
+            tickerSeconds = seconds
+            mainHandler.removeCallbacks(tickerRunnable)
+            if (seconds > 0) mainHandler.postDelayed(tickerRunnable, seconds * 1000L)
+        }
+    }
+
+    /** 停止节拍（关闭自主回复、或网页要求暂停时调用）。 */
+    fun stopTicker() {
+        mainHandler.post {
+            tickerSeconds = 0
+            mainHandler.removeCallbacks(tickerRunnable)
+        }
     }
 
     private fun publish(payload: JSONObject) {
